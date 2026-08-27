@@ -1,0 +1,15 @@
+{
+  "name": "ARXYN — One Sound. Everyone.",
+  "short_name": "ARXYN",
+  "description": "Listen together. Stay synchronized. Connect through sound.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#11120f",
+  "theme_color": "#e98268",
+  "icons": [{
+    "src": "/favicon.svg",
+    "sizes": "any",
+    "type": "image/svg+xml",
+    "purpose": "any maskable"
+  }]
+}
