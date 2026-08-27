@@ -11,16 +11,31 @@ type Message = { id: string; body: string; created_at: string; user_id: string |
 const gradient = 'linear-gradient(135deg,#e78367,#45352b 48%,#d4bd7b)';
 const authConfigError = 'Authentication is not configured for this deployment. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to the Vercel project environment.';
 
-const googleAuthRedirectUrl = 'https://nikrtdlghiqvfmufqkt.supabase.co/auth/v1/callback';
+const appBaseUrl = (import.meta.env.VITE_SITE_URL || import.meta.env.VITE_APP_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173')).replace(/\/$/, '');
+const googleAuthRedirectUrl = new URL('/auth/callback', `${appBaseUrl}/`).toString();
 
-const getAuthRedirectUrl = (path: string) => {
-  if (typeof window === 'undefined') return `http://localhost:5173${path}`;
-  return new URL(path, `${window.location.origin}/`).toString();
-};
+const getAuthRedirectUrl = (path: string) => new URL(path, `${appBaseUrl}/`).toString();
+
+async function ensureProfileForUser(user: User | null) {
+  if (!supabase || !user?.id) return;
+
+  const profileName = user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split('@')[0] || 'ARXYN user';
+  const profileEmail = user.email || '';
+
+  const { error } = await supabase.from('profiles').upsert({
+    id: user.id,
+    name: profileName,
+    email: profileEmail,
+  }, { onConflict: 'id' });
+
+  if (error) {
+    console.error('Profile sync failed:', error);
+  }
+}
 
 function App() {
   const [session, setSession] = useState<Session | null>(null); const [ready, setReady] = useState(false); const [intro, setIntro] = useState(true); const [view, setView] = useState<View>('home'); const [roomId, setRoomId] = useState<string | null>(null); const [modal, setModal] = useState<'create' | 'join' | null>(null); const [toast, setToast] = useState(''); const [dark, setDark] = useState(true);
-  useEffect(() => { const timer = setTimeout(() => setIntro(false), 900); if (!supabase) { setReady(true); return () => clearTimeout(timer); } supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true); }); const { data } = supabase.auth.onAuthStateChange((_event, next) => setSession(next)); return () => { clearTimeout(timer); data.subscription.unsubscribe(); }; }, []);
+  useEffect(() => { const timer = setTimeout(() => setIntro(false), 900); if (!supabase) { setReady(true); return () => clearTimeout(timer); } supabase.auth.getSession().then(async ({ data }) => { setSession(data.session); if (data.session?.user) await ensureProfileForUser(data.session.user); setReady(true); }); const { data } = supabase.auth.onAuthStateChange(async (_event, next) => { setSession(next); if (next?.user) await ensureProfileForUser(next.user); }); return () => { clearTimeout(timer); data.subscription.unsubscribe(); }; }, []);
   const notify = (text: string) => { setToast(text); setTimeout(() => setToast(''), 2600); }; const openRoom = (id: string) => { setRoomId(id); setView('room'); history.pushState({}, '', `/room/${id}`); }; const logout = async () => { await supabase?.auth.signOut(); setSession(null); setView('home'); setRoomId(null); history.pushState({}, '', '/'); };
   if (intro) return <Intro/>; if (!ready) return <Loading text="Restoring your session"/>; if (!session) return <Auth/>;
   return <Shell session={session} view={view} setView={setView} roomId={roomId} openRoom={openRoom} modal={modal} setModal={setModal} dark={dark} setDark={setDark} logout={logout} notify={notify} toast={toast}/>;
