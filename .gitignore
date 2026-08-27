@@ -3,5 +3,8 @@ dist/
 .env
 .env.*
 !.env.example
+.env.local
+.env.*.local
+*.log
 .vscode/
 .DS_Store
