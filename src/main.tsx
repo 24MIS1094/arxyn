@@ -12,9 +12,9 @@ type Room = {
   name: string;
   description: string | null;
   code: string;
-  capacity: number;
-  owner_id: string;
-  privacy: string;
+  max_participants: number;
+  host_id: string;
+  visibility: string;
   created_at?: string;
   updated_at?: string;
 };
@@ -59,7 +59,7 @@ const googleAuthRedirectUrl = new URL('/auth/callback', `${appBaseUrl}/`).toStri
 const getAuthRedirectUrl = (path: string) => new URL(path, `${appBaseUrl}/`).toString();
 const gradient = 'linear-gradient(135deg, rgba(137, 168, 255, 0.24), rgba(255, 128, 102, 0.2) 40%, rgba(122, 89, 255, 0.18));';
 
-const roomSelectColumns = 'id, name, description, code, owner_id, capacity, privacy, created_at';
+const roomSelectColumns = 'id, name, description, code, host_id, max_participants, visibility, created_at';
 
 const generateRoomCode = () => Math.random().toString(36).slice(2, 8).toUpperCase().padEnd(6, 'A');
 
@@ -482,7 +482,7 @@ function Home({ setModal, openRoom, userId }: { setModal: (modal: 'create' | 'jo
       const { data, error } = await supabase
         .from('rooms')
         .select(roomSelectColumns)
-        .eq('owner_id', userId)
+        .eq('host_id', userId)
         .order('created_at', { ascending: false });
 
       if (!error) {
@@ -586,9 +586,9 @@ function Home({ setModal, openRoom, userId }: { setModal: (modal: 'create' | 'jo
                 <button key={room.id} className="room-row" onClick={() => openRoom(room.id)}>
                   <div className="room-row-meta">
                     <strong>{room.name}</strong>
-                    <span>{room.code} � {room.capacity} max</span>
+                    <span>{room.code} � {room.max_participants} max</span>
                   </div>
-                  <span className="badge">{room.privacy}</span>
+                  <span className="badge">{room.visibility}</span>
                 </button>
               ))}
             </div>
@@ -613,7 +613,7 @@ function Rooms({ userId, setModal, openRoom }: { userId: string; setModal: (moda
       const { data, error } = await supabase
         .from('rooms')
         .select(roomSelectColumns)
-        .eq('owner_id', userId)
+        .eq('host_id', userId)
         .order('created_at', { ascending: false });
 
       if (!error) {
@@ -656,9 +656,9 @@ function Rooms({ userId, setModal, openRoom }: { userId: string; setModal: (moda
               <div className="room-card-body">
                 <div>
                   <h4>{room.name}</h4>
-                  <p>{room.privacy} � {room.code}</p>
+                  <p>{room.visibility} � {room.code}</p>
                 </div>
-                <span className="connected">{room.capacity} max</span>
+                <span className="connected">{room.max_participants} max</span>
               </div>
             </button>
           ))}
@@ -671,8 +671,8 @@ function Rooms({ userId, setModal, openRoom }: { userId: string; setModal: (moda
 function CreateRoom({ userId, close, openRoom, notify }: { userId: string; close: () => void; openRoom: (id: string) => void; notify: (text: string) => void }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [capacity, setCapacity] = useState('10');
-  const [privacy, setPrivacy] = useState('private');
+  const [maxParticipants, setMaxParticipants] = useState('10');
+  const [visibility, setVisibility] = useState('public');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -714,12 +714,12 @@ function CreateRoom({ userId, close, openRoom, notify }: { userId: string; close
       const { data, error: insertError } = await supabase
         .from('rooms')
         .insert({
-          owner_id: userId,
+          code: uniqueCode,
           name: name.trim(),
           description: description.trim() || null,
-          capacity: Number(capacity || 10),
-          privacy,
-          code: uniqueCode,
+          max_participants: Number(maxParticipants || 10),
+          visibility,
+          host_id: userId,
         })
         .select(roomSelectColumns)
         .single();
@@ -757,12 +757,12 @@ function CreateRoom({ userId, close, openRoom, notify }: { userId: string; close
 
         <label>
           Maximum Participants
-          <input type="number" min={2} max={100} value={capacity} onChange={(e) => setCapacity(e.target.value)} />
+          <input type="number" min={2} max={100} value={maxParticipants} onChange={(e) => setMaxParticipants(e.target.value)} />
         </label>
 
         <label>
           Visibility
-          <select value={privacy} onChange={(e) => setPrivacy(e.target.value)}>
+          <select value={visibility} onChange={(e) => setVisibility(e.target.value)}>
             <option value="public">Public</option>
             <option value="private">Private</option>
           </select>
@@ -959,7 +959,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastSyncRef = useRef(0);
 
-  const isHost = room?.owner_id === userId;
+  const isHost = room?.host_id === userId;
   const currentItem = queue.find((item) => playback && item.media_id === playback.media_id) ?? queue[0] ?? null;
 
   const syncActiveSource = () => {
@@ -1286,7 +1286,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
           <h1>{room.name}</h1>
           <div className="room-meta">
             <span className="room-state"><i />{members.length} connected</span>
-            <span><Users size={14} /> {room.capacity} max</span>
+            <span><Users size={14} /> {room.max_participants} max</span>
             <span className="code-box">{room.code}</span>
           </div>
         </div>
@@ -1304,7 +1304,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
         <section className="panel player-panel">
           <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}>
             <div className="art-overlay">
-              <span>{room.privacy}</span>
+              <span>{room.visibility}</span>
               <span className="art-more">LIVE</span>
             </div>
           </div>
