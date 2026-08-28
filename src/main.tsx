@@ -119,6 +119,37 @@ const isAudioFile = (file: File) => {
   return allowedAudioMimeTypes.has(file.type) || file.type.startsWith('audio/') || allowedAudioExtensions.has(extension);
 };
 
+const joinRoom = async (roomId: string) => {
+  if (!supabase) {
+    throw new Error('Supabase is not configured.');
+  }
+
+  const { data: authUser, error: authError } = await supabase.auth.getUser();
+  if (authError) throw authError;
+  if (!authUser.user) throw new Error('AUTH_REQUIRED');
+
+  const { data, error } = await supabase.rpc('join_room', {
+    p_room_id: roomId,
+  });
+
+  if (error) {
+    console.error('JOIN ROOM RPC ERROR:', error);
+    console.error('ROOM ID:', roomId);
+    console.error('ERROR MESSAGE:', error.message);
+    console.error('ERROR DETAILS:', error.details);
+    console.error('ERROR HINT:', error.hint);
+    console.error('ERROR CODE:', error.code);
+
+    throw new Error(`Unable to join room: ${error.message || 'Unknown error'}`);
+  }
+
+  if (data !== true) {
+    throw new Error('Unable to join room: The join operation was not confirmed.');
+  }
+
+  return data;
+};
+
 const getDisplayRoomName = (room: Room) => room.name || 'Untitled room';
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -897,23 +928,17 @@ function JoinRoom({ close, openRoom, notify }: { close: () => void; openRoom: (i
       return;
     }
 
-    const { data: authUser } = await supabase.auth.getUser();
-    if (!authUser.user) {
+    try {
+      await joinRoom(room.id);
+    } catch (joinError) {
+      const errorMessage = joinError instanceof Error ? joinError.message : String(joinError);
+      logSupabaseError('join_room RPC', 'JOIN room by code', { message: errorMessage });
       setBusy(false);
-      setError('You must be signed in to join a room.');
+      setError(getJoinErrorMessage({ message: errorMessage }));
       return;
     }
-
-    const { data: joined, error: memberError } = await supabase.rpc('join_room', { p_room_id: room.id });
 
     setBusy(false);
-
-    if (memberError || joined !== true) {
-      const joinError = memberError ?? { message: 'The room join was not confirmed.' };
-      logSupabaseError('join_room RPC', 'JOIN room by code', joinError);
-      setError(getJoinErrorMessage(joinError));
-      return;
-    }
 
     close();
     notify(`Connected to Room ${room.code}`);
@@ -1203,9 +1228,11 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
       setRoom(roomData as Room);
 
-      const { data: joined, error: membershipError } = await client.rpc('join_room', { p_room_id: roomId });
-      if (membershipError || joined !== true) {
-        logSupabaseError('join_room RPC', 'JOIN room', membershipError ?? { message: 'The room join was not confirmed.' });
+      try {
+        await joinRoom(roomId);
+      } catch (joinError) {
+        const errorMessage = joinError instanceof Error ? joinError.message : String(joinError);
+        logSupabaseError('join_room RPC', 'JOIN room', { message: errorMessage });
         setError('Unable to join this room. Please try again.');
         return;
       }
