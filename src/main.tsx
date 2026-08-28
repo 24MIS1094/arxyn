@@ -58,9 +58,11 @@ const authConfigError = 'Authentication is not configured for this deployment. A
 const appBaseUrl = (import.meta.env.VITE_SITE_URL || import.meta.env.VITE_APP_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173')).replace(/\/$/, '');
 const googleAuthRedirectUrl = new URL('/auth/callback', `${appBaseUrl}/`).toString();
 const getAuthRedirectUrl = (path: string) => new URL(path, `${appBaseUrl}/`).toString();
-const getRoomIdFromPath = (pathname: string) => {
+const getRoomIdFromLocation = (pathname: string, search: string) => {
   const match = pathname.match(/^\/room\/([^/]+)\/?$/);
-  return match ? decodeURIComponent(match[1]) : null;
+  if (match) return decodeURIComponent(match[1]);
+  const roomId = new URLSearchParams(search).get('room');
+  return roomId?.trim() || null;
 };
 const getRoomUrl = (id: string) => `${window.location.origin}/room/${encodeURIComponent(id)}`;
 const gradient = 'linear-gradient(135deg, rgba(137, 168, 255, 0.24), rgba(255, 128, 102, 0.2) 40%, rgba(122, 89, 255, 0.18));';
@@ -190,7 +192,7 @@ function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
   const [intro, setIntro] = useState(true);
-  const initialRoomId = getRoomIdFromPath(window.location.pathname);
+  const initialRoomId = getRoomIdFromLocation(window.location.pathname, window.location.search);
   const [view, setView] = useState<View>(initialRoomId ? 'room' : 'home');
   const [roomId, setRoomId] = useState<string | null>(initialRoomId);
   const [modal, setModal] = useState<'create' | 'join' | null>(null);
@@ -256,7 +258,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const pendingRoomId = getRoomIdFromPath(window.location.pathname);
+    const pendingRoomId = getRoomIdFromLocation(window.location.pathname, window.location.search);
     if (!session && pendingRoomId) {
       sessionStorage.setItem('arxyn_pending_room_id', pendingRoomId);
     }
@@ -264,7 +266,7 @@ function App() {
 
   useEffect(() => {
     const handlePopState = () => {
-      const nextRoomId = getRoomIdFromPath(window.location.pathname);
+      const nextRoomId = getRoomIdFromLocation(window.location.pathname, window.location.search);
       setRoomId(nextRoomId);
       setView(nextRoomId ? 'room' : 'home');
     };
