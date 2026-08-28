@@ -1,6 +1,7 @@
 import { type ChangeEvent, type FormEvent, Component, type ErrorInfo, type ReactNode, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AlertCircle, ArrowUpRight, Check, Copy, Home as HomeIcon, LoaderCircle, LogOut, Menu, Music2, Pause, Play, Plus, Radio, Search, Settings, Share2, SkipBack, SkipForward, Users, X } from 'lucide-react';
+import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from './lib/supabase';
 import type { Session } from '@supabase/supabase-js';
 import './index.css';
@@ -57,6 +58,11 @@ const authConfigError = 'Authentication is not configured for this deployment. A
 const appBaseUrl = (import.meta.env.VITE_SITE_URL || import.meta.env.VITE_APP_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173')).replace(/\/$/, '');
 const googleAuthRedirectUrl = new URL('/auth/callback', `${appBaseUrl}/`).toString();
 const getAuthRedirectUrl = (path: string) => new URL(path, `${appBaseUrl}/`).toString();
+const getRoomIdFromPath = (pathname: string) => {
+  const match = pathname.match(/^\/room\/([^/]+)\/?$/);
+  return match ? decodeURIComponent(match[1]) : null;
+};
+const getRoomUrl = (id: string) => `${window.location.origin}/room/${encodeURIComponent(id)}`;
 const gradient = 'linear-gradient(135deg, rgba(137, 168, 255, 0.24), rgba(255, 128, 102, 0.2) 40%, rgba(122, 89, 255, 0.18));';
 const audioBucket = 'audio';
 const allowedAudioMimeTypes = new Set(['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/aac', 'audio/ogg', 'audio/webm']);
@@ -153,8 +159,9 @@ function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
   const [intro, setIntro] = useState(true);
-  const [view, setView] = useState<View>('home');
-  const [roomId, setRoomId] = useState<string | null>(null);
+  const initialRoomId = getRoomIdFromPath(window.location.pathname);
+  const [view, setView] = useState<View>(initialRoomId ? 'room' : 'home');
+  const [roomId, setRoomId] = useState<string | null>(initialRoomId);
   const [modal, setModal] = useState<'create' | 'join' | null>(null);
   const [toast, setToast] = useState('');
   const [dark, setDark] = useState(true);
@@ -177,6 +184,13 @@ function App() {
           setInitError(error.message);
         }
         setSession(data.session);
+        const pendingRoomId = sessionStorage.getItem('arxyn_pending_room_id');
+        if (data.session && pendingRoomId) {
+          setRoomId(pendingRoomId);
+          setView('room');
+          window.history.replaceState({}, '', `/room/${encodeURIComponent(pendingRoomId)}`);
+          sessionStorage.removeItem('arxyn_pending_room_id');
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unexpected authentication initialization error';
         console.error('ARXYN auth bootstrap failed:', error);
@@ -189,7 +203,16 @@ function App() {
     void initialise();
 
     if (supabase) {
-      const { data } = supabase.auth.onAuthStateChange((_event, next) => setSession(next));
+      const { data } = supabase.auth.onAuthStateChange((_event, next) => {
+        setSession(next);
+        const pendingRoomId = sessionStorage.getItem('arxyn_pending_room_id');
+        if (next && pendingRoomId) {
+          setRoomId(pendingRoomId);
+          setView('room');
+          window.history.replaceState({}, '', `/room/${encodeURIComponent(pendingRoomId)}`);
+          sessionStorage.removeItem('arxyn_pending_room_id');
+        }
+      });
       return () => {
         window.clearTimeout(timer);
         data.subscription.unsubscribe();
@@ -199,6 +222,23 @@ function App() {
     return () => {
       window.clearTimeout(timer);
     };
+  }, []);
+
+  useEffect(() => {
+    const pendingRoomId = getRoomIdFromPath(window.location.pathname);
+    if (!session && pendingRoomId) {
+      sessionStorage.setItem('arxyn_pending_room_id', pendingRoomId);
+    }
+  }, [session]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const nextRoomId = getRoomIdFromPath(window.location.pathname);
+      setRoomId(nextRoomId);
+      setView(nextRoomId ? 'room' : 'home');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   const notify = (text: string) => {
@@ -994,11 +1034,37 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
   const [currentTime, setCurrentTime] = useState(0);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [showQr, setShowQr] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastSyncRef = useRef(0);
 
   const isHost = room?.host_id === userId;
   const currentItem = queue.find((item) => playback && item.media_id === playback.media_id) ?? queue[0] ?? null;
+  const roomUrl = getRoomUrl(roomId);
+
+  const copyText = async (text: string, successMessage: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      notify(successMessage);
+    } catch (copyError) {
+      console.error('Room sharing clipboard error', copyError);
+      notify('Unable to copy to clipboard.');
+    }
+  };
+
+  const handleShareRoom = async () => {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: 'Join my ARXYN room', text: 'Join my music room on ARXYN', url: roomUrl });
+      } else {
+        await copyText(roomUrl, 'Room link copied!');
+      }
+    } catch (shareError) {
+      if (shareError instanceof DOMException && shareError.name === 'AbortError') return;
+      console.error('Room share error', shareError);
+      notify('Unable to share this room.');
+    }
+  };
 
   const getCurrentAudioUrl = () => currentItem ? getPublicStorageUrl(currentItem.media_id) : '';
 
@@ -1092,6 +1158,17 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       }
 
       setRoom(roomData as Room);
+
+      if (roomData.host_id !== userId) {
+        const { error: membershipError } = await client
+          .from('room_members')
+          .upsert({ room_id: roomId, user_id: userId, role: 'member' }, { onConflict: 'room_id,user_id' });
+        if (membershipError) {
+          logSupabaseError('room_members', 'UPSERT direct-link membership', membershipError);
+          setError(`Unable to join room: ${membershipError.message}`);
+          return;
+        }
+      }
 
       const { data: queueData, error: queueError } = await client
         .from('queue_items')
@@ -1646,12 +1723,12 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
         </div>
 
         <div className="header-actions">
-          <button className="secondary-button" onClick={() => navigator.clipboard?.writeText(room.code).catch(() => {})}>Copy Code</button>
-          <button className="secondary-button" onClick={() => navigator.clipboard?.writeText(`${window.location.origin}/room/${room.id}`)}>
+          <button className="secondary-button" onClick={() => void copyText(room.code, 'Room code copied!')}> <Copy size={15} />Copy Code</button>
+          <button className="secondary-button" onClick={() => void handleShareRoom()}>
             <Share2 size={15} />Share Room
           </button>
           {isHost && <button className="danger-button" onClick={() => void handleDeleteRoom()}>Delete Room</button>}
-          <button className="secondary-button" onClick={() => notify('QR modal ready')}>Show QR</button>
+          <button className="secondary-button" onClick={() => setShowQr(true)}>Show QR</button>
         </div>
       </div>
 
@@ -1799,6 +1876,16 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           </div>
         </aside>
       </div>
+      {showQr && (
+        <Modal title="Share room" close={() => setShowQr(false)}>
+          <div className="qr-modal-content">
+            <QRCodeCanvas value={roomUrl} size={220} includeMargin />
+            <strong>{room.code}</strong>
+            <button className="primary-button full" onClick={() => void copyText(roomUrl, 'Room link copied!')}><Copy size={15} />Copy Link</button>
+            <button className="secondary-button full" onClick={() => setShowQr(false)}>Close</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
