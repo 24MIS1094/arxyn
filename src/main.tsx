@@ -1,4 +1,5 @@
-import { type ChangeEvent, type FormEvent, useEffect, useRef, useState } from 'react';
+import { type ChangeEvent, type FormEvent, Component, type ErrorInfo, type ReactNode, useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
 import { AlertCircle, ArrowUpRight, Check, Copy, Home as HomeIcon, LoaderCircle, LogOut, Menu, Music2, Pause, Play, Plus, Radio, Search, Settings, Share2, SkipBack, SkipForward, Users, X } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import type { Session } from '@supabase/supabase-js';
@@ -80,6 +81,40 @@ const getPublicStorageUrl = (path: string) => {
 
 const getDisplayRoomName = (room: Room) => room.name || 'Untitled room';
 
+class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('ARXYN app render error:', error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="intro-screen">
+          <div className="intro-logo">
+            <span className="brand-mark"><Radio size={20} /></span>
+            <strong>AR<span className="logo-x">X</span>YN</strong>
+          </div>
+          <p>One Sound. Everyone.</p>
+          <div className="form-error" style={{ maxWidth: 560, marginTop: 18 }}>
+            <AlertCircle size={15} />
+            ARXYN could not load correctly. Please refresh or check the app configuration.
+            <br />
+            {this.state.error.message}
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
@@ -89,24 +124,46 @@ function App() {
   const [modal, setModal] = useState<'create' | 'join' | null>(null);
   const [toast, setToast] = useState('');
   const [dark, setDark] = useState(true);
+  const [initError, setInitError] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setIntro(false), 700);
-    if (!supabase) {
-      setReady(true);
-      return () => window.clearTimeout(timer);
+
+    const initialise = async () => {
+      try {
+        if (!supabase) {
+          setReady(true);
+          setInitError(authConfigError);
+          return;
+        }
+
+        const { data, error } = await supabase.auth.getSession();
+        if (error) {
+          console.error('Supabase session initialization error:', error);
+          setInitError(error.message);
+        }
+        setSession(data.session);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unexpected authentication initialization error';
+        console.error('ARXYN auth bootstrap failed:', error);
+        setInitError(message);
+      } finally {
+        setReady(true);
+      }
+    };
+
+    void initialise();
+
+    if (supabase) {
+      const { data } = supabase.auth.onAuthStateChange((_event, next) => setSession(next));
+      return () => {
+        window.clearTimeout(timer);
+        data.subscription.unsubscribe();
+      };
     }
-
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setReady(true);
-    });
-
-    const { data } = supabase.auth.onAuthStateChange((_event, next) => setSession(next));
 
     return () => {
       window.clearTimeout(timer);
-      data.subscription.unsubscribe();
     };
   }, []);
 
@@ -131,7 +188,7 @@ function App() {
 
   if (intro) return <Intro />;
   if (!ready) return <Loading text="Restoring your session" />;
-  if (!session) return <Auth />;
+  if (!session) return <Auth initError={initError} />;
 
   return (
     <Shell
@@ -180,7 +237,7 @@ function Loading({ text }: { text: string }) {
   );
 }
 
-function Auth() {
+function Auth({ initError }: { initError?: string | null }) {
   const [mode, setMode] = useState<'signin' | 'signup' | 'reset'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -290,6 +347,7 @@ function Auth() {
             </label>
           )}
 
+          {initError && <div className="form-error"><AlertCircle size={15} />{initError}</div>}
           {error && <div className="form-error"><AlertCircle size={15} />{error}</div>}
           {message && <div className="form-success"><Check size={15} />{message}</div>}
 
@@ -1334,5 +1392,19 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
     </div>
   );
 }
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error('ARXYN root container not found.');
+}
+
+const root = (globalThis as typeof globalThis & { __arxynRoot?: ReturnType<typeof createRoot> }).__arxynRoot ?? createRoot(rootElement);
+(root as ReturnType<typeof createRoot>).render(
+  <AppErrorBoundary>
+    <App />
+  </AppErrorBoundary>,
+);
+
+(globalThis as typeof globalThis & { __arxynRoot?: ReturnType<typeof createRoot> }).__arxynRoot = root;
 
 export default App;
