@@ -81,7 +81,7 @@ with check (
   )
 );
 
-create or replace function public.ensure_room_audio_bucket()
+create or replace function public.ensure_audio_bucket()
 returns void
 language plpgsql
 security definer
@@ -89,7 +89,7 @@ set search_path = public
 as $$
 begin
   insert into storage.buckets (id, name, public)
-  values ('room-audio', 'room-audio', true)
+  values ('audio', 'audio', true)
   on conflict (id) do nothing;
 end;
 $$;
@@ -128,10 +128,10 @@ before insert or update on public.queue_items
 for each row
 execute function public.room_queue_item_position_guard();
 
-create policy "allow room-audio bucket reads for members" on storage.objects
+create policy "allow audio bucket reads for members" on storage.objects
 for select to authenticated
 using (
-  bucket_id = 'room-audio' and
+  bucket_id = 'audio' and
   exists (
     select 1
     from public.room_members rm

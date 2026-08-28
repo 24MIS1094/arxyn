@@ -58,6 +58,7 @@ const appBaseUrl = (import.meta.env.VITE_SITE_URL || import.meta.env.VITE_APP_UR
 const googleAuthRedirectUrl = new URL('/auth/callback', `${appBaseUrl}/`).toString();
 const getAuthRedirectUrl = (path: string) => new URL(path, `${appBaseUrl}/`).toString();
 const gradient = 'linear-gradient(135deg, rgba(137, 168, 255, 0.24), rgba(255, 128, 102, 0.2) 40%, rgba(122, 89, 255, 0.18));';
+const audioBucket = 'audio';
 
 const roomSelectColumns = 'id, name, description, code, host_id, max_participants, visibility, created_at';
 
@@ -74,7 +75,7 @@ const getPublicStorageUrl = (path: string) => {
   if (!supabase) return path;
   if (!path || path.startsWith('http://') || path.startsWith('https://') || path.startsWith('blob:')) return path;
   try {
-    const { data } = supabase.storage.from('room-audio').getPublicUrl(path);
+    const { data } = supabase.storage.from(audioBucket).getPublicUrl(path);
     return data?.publicUrl || path;
   } catch {
     return path;
@@ -1111,19 +1112,28 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
     try {
       for (const file of files) {
         const storagePath = `rooms/${roomId}/${Date.now()}-${file.name}`;
-        const { error: uploadError } = await supabase.storage.from('room-audio').upload(storagePath, file, { cacheControl: '3600', upsert: true });
+        console.log('Uploading audio to bucket:', audioBucket);
+        const { data: uploadedFile, error: uploadError } = await supabase.storage.from(audioBucket).upload(storagePath, file, { cacheControl: '3600', upsert: true });
 
         if (uploadError) {
           console.error('Upload error', uploadError);
-          notify(`Upload failed: ${uploadError.message}`);
-          setSongReady('Audio upload failed');
+          const message = uploadError.message.toLowerCase().includes('bucket not found')
+            ? "Audio storage is not configured. Please create the 'audio' storage bucket in Supabase."
+            : uploadError.message;
+          notify(message);
+          setSongReady(message);
           continue;
         }
+
+        const uploadedPath = uploadedFile?.path || storagePath;
+        const audioUrl = getPublicStorageUrl(uploadedPath);
+        console.log('Uploaded audio path:', uploadedPath);
+        console.log('Playable audio URL:', audioUrl);
 
         const item: QueueItem = {
           id: crypto.randomUUID(),
           room_id: roomId,
-          media_id: storagePath,
+          media_id: uploadedPath,
           title: file.name.replace(/\.[^/.]+$/, ''),
           artist: 'Local upload',
           artwork_url: null,
@@ -1136,7 +1146,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
         const { error: insertError } = await supabase.from('queue_items').insert({
           room_id: roomId,
-          media_id: storagePath,
+          media_id: uploadedPath,
           title: item.title,
           artist: item.artist,
           artwork_url: item.artwork_url,
