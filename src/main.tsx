@@ -1076,6 +1076,37 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
   const getCurrentAudioUrl = () => currentItem ? getPublicStorageUrl(currentItem.media_id) : '';
 
+  const loadRoomMembers = async (client: NonNullable<typeof supabase>) => {
+    try {
+      const { data: memberRows, error: memberError } = await client.from('room_members').select('*').eq('room_id', roomId);
+      if (memberError) {
+        logSupabaseError('room_members', 'SELECT room members', memberError);
+        setMembers([]);
+        return;
+      }
+
+      const userIds = [...new Set((memberRows ?? []).map((member) => member.user_id))];
+      const { data: profileRows, error: profileError } = userIds.length
+        ? await client.from('profiles').select('id, name, email').in('id', userIds)
+        : { data: [], error: null };
+
+      if (profileError) {
+        logSupabaseError('profiles', 'SELECT room profiles', profileError);
+      }
+
+      const profileMap = new Map((profileRows ?? []).map((profile) => [profile.id, profile]));
+      setMembers((memberRows ?? []).map((member) => ({
+        user_id: member.user_id,
+        role: member.role,
+        joined_at: member.joined_at,
+        display_name: profileMap.get(member.user_id)?.name || profileMap.get(member.user_id)?.email || 'User',
+      })));
+    } catch (memberLoadError) {
+      console.error('Optional room member loading failed:', memberLoadError);
+      setMembers([]);
+    }
+  };
+
   const loadCurrentAudio = () => {
     const audio = audioRef.current;
     const nextSource = getCurrentAudioUrl();
@@ -1172,13 +1203,11 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
       setRoom(roomData as Room);
 
-      if (roomData.host_id !== userId) {
-        const { error: membershipError } = await client.rpc('join_room', { p_room_id: roomId });
-        if (membershipError) {
-          logSupabaseError('join_room RPC', 'JOIN room', membershipError);
-          setError('Unable to join this room. Please try again.');
-          return;
-        }
+      const { data: joined, error: membershipError } = await client.rpc('join_room', { p_room_id: roomId });
+      if (membershipError || joined !== true) {
+        logSupabaseError('join_room RPC', 'JOIN room', membershipError ?? { message: 'The room join was not confirmed.' });
+        setError('Unable to join this room. Please try again.');
+        return;
       }
 
       const { data: queueData, error: queueError } = await client
@@ -1224,33 +1253,11 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
         });
       }
 
-      const { data: memberRows, error: memberError } = await client.from('room_members').select('*').eq('room_id', roomId);
-      if (memberError) {
-        logSupabaseError('room_members', 'SELECT room members', memberError);
-        setMembers([]);
-      } else {
-        const userIds = [...new Set((memberRows ?? []).map((member) => member.user_id))];
-        const { data: profileRows, error: profileError } = userIds.length
-          ? await client.from('profiles').select('id, name, email').in('id', userIds)
-          : { data: [], error: null };
-
-        if (profileError) {
-          logSupabaseError('profiles', 'SELECT room profiles', profileError);
-        }
-
-        const profileMap = new Map((profileRows ?? []).map((profile) => [profile.id, profile]));
-        const mappedMembers = (memberRows ?? []).map((member) => ({
-          user_id: member.user_id,
-          role: member.role,
-          joined_at: member.joined_at,
-          display_name: profileMap.get(member.user_id)?.name || profileMap.get(member.user_id)?.email || 'User',
-        }));
-        setMembers(mappedMembers);
-      }
+      void loadRoomMembers(client);
     };
 
     void loadRoom();
-  }, [roomId]);
+  }, [roomId, userId]);
 
   useEffect(() => {
     if (!supabase || !roomId) return;
@@ -1274,17 +1281,8 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       .on('postgres_changes', { event: '*', schema: 'public', table: 'playback_state', filter: `room_id=eq.${roomId}` }, (payload) => {
         setPlayback((payload.new as PlaybackState) ?? null);
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_members', filter: `room_id=eq.${roomId}` }, async () => {
-        const { data: memberRows } = await client.from('room_members').select('*').eq('room_id', roomId);
-        const userIds = [...new Set((memberRows ?? []).map((member) => member.user_id))];
-        const { data: profileRows } = userIds.length ? await client.from('profiles').select('id, name, email').in('id', userIds) : { data: [] };
-        const profileMap = new Map((profileRows ?? []).map((profile) => [profile.id, profile]));
-        setMembers((memberRows ?? []).map((member) => ({
-          user_id: member.user_id,
-          role: member.role,
-          joined_at: member.joined_at,
-          display_name: profileMap.get(member.user_id)?.name || profileMap.get(member.user_id)?.email || 'User',
-        })));
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_members', filter: `room_id=eq.${roomId}` }, () => {
+        void loadRoomMembers(client);
       })
       .subscribe();
 
