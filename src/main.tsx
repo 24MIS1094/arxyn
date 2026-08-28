@@ -988,35 +988,57 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
   const [uploading, setUploading] = useState(false);
   const [songReady, setSongReady] = useState<string>('');
   const [audioDuration, setAudioDuration] = useState(0);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastSyncRef = useRef(0);
 
   const isHost = room?.host_id === userId;
   const currentItem = queue.find((item) => playback && item.media_id === playback.media_id) ?? queue[0] ?? null;
 
-  const syncActiveSource = () => {
-    const audio = audioRef.current;
-    if (!audio || !currentItem) return;
+  const getCurrentAudioUrl = () => currentItem ? getPublicStorageUrl(currentItem.media_id) : '';
 
-    const nextSource = currentItem.media_id.startsWith('http') || currentItem.media_id.startsWith('blob:')
-      ? currentItem.media_id
-      : getPublicStorageUrl(currentItem.media_id);
+  const loadCurrentAudio = () => {
+    const audio = audioRef.current;
+    const nextSource = getCurrentAudioUrl();
+    if (!audio || !nextSource || nextSource.startsWith('blob:') || nextSource.startsWith('file:')) return '';
 
     if (audio.src !== nextSource) {
       audio.src = nextSource;
-      if (playback?.is_playing) {
-        audio.play().catch(() => {});
-      }
+      audio.load();
     }
+    return nextSource;
+  };
+
+  const syncActiveSource = async () => {
+    const audio = audioRef.current;
+    const nextSource = loadCurrentAudio();
+    if (!audio || !currentItem || !nextSource) return;
 
     if (playback) {
-      const target = Number(playback.position_ms || 0) / 1000;
+      const elapsed = playback.is_playing
+        ? Math.max(0, (Date.now() - Date.parse(playback.server_timestamp)) / 1000)
+        : 0;
+      const target = Number(playback.position_ms || 0) / 1000 + elapsed;
       const delta = Math.abs(audio.currentTime - target);
       if (delta > 0.75) {
         audio.currentTime = target;
       }
       if (playback.is_playing) {
-        audio.play().catch(() => {});
+        console.log('PLAYBACK DEBUG', {
+          song: currentItem,
+          audioUrl: nextSource,
+          currentTime: audio.currentTime,
+          readyState: audio.readyState,
+          networkState: audio.networkState,
+        });
+        try {
+          await audio.play();
+          setAutoplayBlocked(false);
+        } catch (playError) {
+          console.error('AUDIO PLAY ERROR', playError);
+          setAutoplayBlocked(true);
+          notify('Tap to Sync & Play');
+        }
       } else {
         audio.pause();
       }
@@ -1139,6 +1161,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
     setUploading(true);
     setSongReady('Uploading Song...');
+    let nextPosition = queue.length + 1;
 
     try {
       for (const file of files) {
@@ -1150,16 +1173,17 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
         }
 
         const safeFileName = getSafeAudioFileName(file.name);
-        const storagePath = `${roomId}/${crypto.randomUUID()}-${safeFileName}`;
+        const uploadPath = `${roomId}/${crypto.randomUUID()}-${safeFileName}`;
         console.log('AUDIO UPLOAD DEBUG', {
           bucket: audioBucket,
           fileName: file.name,
           fileType: file.type,
           fileSize: file.size,
-          path: storagePath,
+          roomId,
+          uploadPath,
         });
         console.log('Uploading audio to bucket:', audioBucket);
-        const { data: uploadedFile, error: uploadError } = await supabase.storage.from('audio').upload(storagePath, file, { cacheControl: '3600', upsert: false });
+        const { data: uploadedFile, error: uploadError } = await supabase.storage.from('audio').upload(uploadPath, file, { cacheControl: '3600', upsert: false });
 
         if (uploadError) {
           const errorDetails = uploadError as unknown as Record<string, unknown>;
@@ -1182,9 +1206,11 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
           continue;
         }
 
-        const uploadedPath = uploadedFile?.path || storagePath;
+        const uploadedPath = uploadedFile?.path || uploadPath;
         const audioUrl = getPublicStorageUrl(uploadedPath);
+        console.log('AUDIO UPLOAD RESPONSE', uploadedFile);
         console.log('Uploaded audio path:', uploadedPath);
+        console.log('AUDIO URL', audioUrl);
         console.log('Playable audio URL:', audioUrl);
 
         const item: QueueItem = {
@@ -1194,25 +1220,25 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
           title: file.name.replace(/\.[^/.]+$/, ''),
           artist: 'Local upload',
           artwork_url: null,
-          position: queue.length + 1,
+          position: nextPosition,
           duration_ms: 0,
           source_type: 'device_file',
           created_at: new Date().toISOString(),
           requested_by: userId,
         };
 
-        const { error: insertError } = await supabase.from('queue_items').insert({
+        const { data: insertedItem, error: insertError } = await supabase.from('queue_items').insert({
           room_id: roomId,
           media_id: uploadedPath,
           title: item.title,
           artist: item.artist,
           artwork_url: item.artwork_url,
-          position: queue.length + 1,
+          position: nextPosition,
           requested_by: userId,
           source_type: 'device_file',
           duration_ms: item.duration_ms,
           status: 'queued',
-        });
+        }).select('id, room_id, media_id, title, artist, artwork_url, position, duration_ms, source_type, created_at, requested_by').single();
 
         if (insertError) {
           logSupabaseError('queue_items', 'INSERT', insertError);
@@ -1223,6 +1249,10 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
           notify(insertError.message);
           setSongReady(insertError.message);
         } else {
+          if (insertedItem) {
+            setQueue((existingQueue) => [...existingQueue, insertedItem as QueueItem].sort((left, right) => left.position - right.position));
+          }
+          nextPosition += 1;
           setSongReady(`${file.name} ready`);
         }
       }
@@ -1273,8 +1303,32 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
     const shouldPlay = !(playback?.is_playing ?? false);
     if (shouldPlay) {
-      const currentTime = audioRef.current.currentTime || Number(playback?.position_ms || 0) / 1000;
-      audioRef.current.currentTime = currentTime;
+      const audioUrl = loadCurrentAudio();
+      if (!audioUrl) {
+        const message = 'Unable to play this audio: no playable Storage URL is available.';
+        console.error('AUDIO PLAY ERROR', message);
+        notify(message);
+        return;
+      }
+      const audio = audioRef.current;
+      const currentTime = audio.currentTime || Number(playback?.position_ms || 0) / 1000;
+      audio.currentTime = currentTime;
+      console.log('PLAYBACK DEBUG', {
+        song: currentItem,
+        audioUrl,
+        currentTime: audio.currentTime,
+        readyState: audio.readyState,
+        networkState: audio.networkState,
+      });
+      try {
+        await audio.play();
+        setAutoplayBlocked(false);
+      } catch (playError) {
+        console.error('AUDIO PLAY ERROR', playError);
+        setAutoplayBlocked(true);
+        notify(`Unable to play this audio: ${playError instanceof Error ? playError.message : String(playError)}`);
+        return;
+      }
       await updatePlayback({
         media_id: currentItem.media_id,
         title: currentItem.title,
@@ -1285,7 +1339,6 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
         server_timestamp: new Date().toISOString(),
         sequence_number: (playback?.sequence_number ?? 0) + 1,
       });
-      await audioRef.current.play().catch(() => {});
     } else {
       const currentTime = audioRef.current.currentTime || Number(playback?.position_ms || 0) / 1000;
       await updatePlayback({
@@ -1300,6 +1353,44 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
       });
       audioRef.current.pause();
     }
+  };
+
+  const handleSyncAndPlay = async () => {
+    const audio = audioRef.current;
+    const source = loadCurrentAudio();
+    if (!audio || !source || !playback || !currentItem) return;
+    const elapsed = playback.is_playing
+      ? Math.max(0, (Date.now() - Date.parse(playback.server_timestamp)) / 1000)
+      : 0;
+    audio.currentTime = Number(playback.position_ms || 0) / 1000 + elapsed;
+    console.log('PLAYBACK DEBUG', {
+      song: currentItem,
+      audioUrl: source,
+      currentTime: audio.currentTime,
+      readyState: audio.readyState,
+      networkState: audio.networkState,
+    });
+    try {
+      await audio.play();
+      setAutoplayBlocked(false);
+    } catch (playError) {
+      console.error('AUDIO PLAY ERROR', playError);
+      notify(`Unable to play this audio: ${playError instanceof Error ? playError.message : String(playError)}`);
+    }
+  };
+
+  const handleSelectTrack = async (item: QueueItem) => {
+    if (!isHost) return;
+    await updatePlayback({
+      media_id: item.media_id,
+      title: item.title,
+      artist: item.artist,
+      artwork_url: item.artwork_url,
+      is_playing: false,
+      position_ms: 0,
+      server_timestamp: new Date().toISOString(),
+      sequence_number: (playback?.sequence_number ?? 0) + 1,
+    });
   };
 
   const handleSeek = async (value: number) => {
@@ -1406,6 +1497,8 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
             <button className="icon-button small" aria-label="Next song"><SkipForward size={18} /></button>
           </div>
 
+          {autoplayBlocked && <button className="secondary-button full" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button>}
+
           <div className="range-block">
             <label htmlFor="seek-slider">Seek</label>
             <input
@@ -1424,7 +1517,22 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
             ref={audioRef}
             onLoadedMetadata={(event) => setAudioDuration((event.currentTarget.duration || 0) * 1000)}
             onTimeUpdate={handleTimeUpdate}
-            onEnded={() => updatePlayback({ is_playing: false, position_ms: 0, server_timestamp: new Date().toISOString() })}
+            onCanPlay={() => console.log('AUDIO CAN PLAY', audioRef.current?.src)}
+            onPlay={() => console.log('AUDIO PLAY', audioRef.current?.src)}
+            onPause={() => console.log('AUDIO PAUSE', audioRef.current?.src)}
+            onWaiting={() => console.log('AUDIO WAITING', audioRef.current?.src)}
+            onCanPlayThrough={() => console.log('AUDIO CAN PLAY THROUGH', audioRef.current?.src)}
+            onError={(event) => {
+              const audio = event.currentTarget;
+              console.error('HTML AUDIO ERROR', {
+                src: audio.src,
+                error: audio.error,
+                code: audio.error?.code,
+                message: audio.error?.message,
+              });
+              notify(`Unable to play this audio: ${audio.error?.message || 'The audio file could not be loaded.'}`);
+            }}
+            onEnded={() => void updatePlayback({ is_playing: false, position_ms: 0, server_timestamp: new Date().toISOString() })}
           />
         </section>
 
@@ -1444,7 +1552,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
               <div className="empty-state compact"><p>No songs in the queue yet.</p></div>
             ) : (
               queue.map((item, index) => (
-                <button key={item.id} className={currentItem?.id === item.id ? 'queue-item active' : 'queue-item'} onClick={() => isHost && handleSeek(index * 10)}>
+                <button key={item.id} className={currentItem?.id === item.id ? 'queue-item active' : 'queue-item'} onClick={() => void handleSelectTrack(item)}>
                   <span className="queue-index">{String(index + 1).padStart(2, '0')}</span>
                   <div>
                     <strong>{item.title}</strong>
