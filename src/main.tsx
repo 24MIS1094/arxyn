@@ -721,7 +721,7 @@ function CreateRoom({ userId, close, openRoom, notify }: { userId: string; close
           visibility,
           host_id: userId,
         })
-        .select()
+        .select('id')
         .single();
 
       if (insertError) {
