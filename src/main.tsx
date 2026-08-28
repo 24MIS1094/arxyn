@@ -238,6 +238,7 @@ function App() {
       logout={logout}
       notify={notify}
       toast={toast}
+      onRoomDeleted={() => { setRoomId(null); setView('home'); window.history.pushState({}, '', '/'); }}
     />
   );
 }
@@ -419,6 +420,7 @@ function Shell({
   logout,
   notify,
   toast,
+  onRoomDeleted,
 }: {
   session: Session;
   view: View;
@@ -432,6 +434,7 @@ function Shell({
   logout: () => Promise<void>;
   notify: (text: string) => void;
   toast: string;
+  onRoomDeleted: () => void;
 }) {
   const name = session.user.user_metadata?.full_name || session.user.email?.split('@')[0] || 'there';
 
@@ -489,7 +492,7 @@ function Shell({
         {view === 'rooms' && <Rooms userId={session.user.id} setModal={setModal} openRoom={openRoom} />}
         {view === 'profile' && <Profile user={session.user} logout={logout} notify={notify} />}
         {view === 'settings' && <SettingsView dark={dark} setDark={setDark} logout={logout} />}
-        {view === 'room' && roomId && <Room roomId={roomId} userId={session.user.id} notify={notify} />}
+        {view === 'room' && roomId && <Room roomId={roomId} userId={session.user.id} notify={notify} onRoomDeleted={onRoomDeleted} />}
       </main>
 
       {modal === 'create' && <CreateRoom userId={session.user.id} close={() => setModal(null)} openRoom={openRoom} notify={notify} />}
@@ -979,7 +982,7 @@ function SettingsView({ dark, setDark, logout }: { dark: boolean; setDark: (dark
   );
 }
 
-function Room({ roomId, userId, notify }: { roomId: string; userId: string; notify: (text: string) => void }) {
+function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userId: string; notify: (text: string) => void; onRoomDeleted: () => void }) {
   const [room, setRoom] = useState<Room | null>(null);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [playback, setPlayback] = useState<PlaybackState | null>(null);
@@ -1090,19 +1093,31 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
       setRoom(roomData as Room);
 
-      const { data: queueData } = await client
+      const { data: queueData, error: queueError } = await client
         .from('queue_items')
         .select('id, room_id, media_id, title, artist, artwork_url, position, duration_ms, source_type, created_at, requested_by')
         .eq('room_id', roomId)
         .order('position', { ascending: true });
 
+      if (queueError) {
+        logSupabaseError('queue_items', 'SELECT room queue', queueError);
+        setError(`Unable to load queue: ${queueError.message}`);
+        return;
+      }
+
       setQueue((queueData ?? []) as QueueItem[]);
 
-      const { data: playbackData } = await client
+      const { data: playbackData, error: playbackError } = await client
         .from('playback_state')
         .select('*')
         .eq('room_id', roomId)
         .maybeSingle();
+
+      if (playbackError) {
+        logSupabaseError('playback_state', 'SELECT room playback', playbackError);
+        setError(`Unable to load playback: ${playbackError.message}`);
+        return;
+      }
 
       if (playbackData) {
         setPlayback(playbackData as PlaybackState);
@@ -1121,11 +1136,20 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
         });
       }
 
-      const { data: memberRows } = await client.from('room_members').select('*').eq('room_id', roomId);
+      const { data: memberRows, error: memberError } = await client.from('room_members').select('*').eq('room_id', roomId);
+      if (memberError) {
+        logSupabaseError('room_members', 'SELECT room members', memberError);
+        setMembers([]);
+        return;
+      }
       const userIds = [...new Set((memberRows ?? []).map((member) => member.user_id))];
-      const { data: profileRows } = userIds.length
+      const { data: profileRows, error: profileError } = userIds.length
         ? await client.from('profiles').select('id, name, email').in('id', userIds)
-        : { data: [] };
+        : { data: [], error: null };
+
+      if (profileError) {
+        logSupabaseError('profiles', 'SELECT room profiles', profileError);
+      }
 
       const profileMap = new Map((profileRows ?? []).map((profile) => [profile.id, profile]));
       const mappedMembers = (memberRows ?? []).map((member) => ({
@@ -1148,6 +1172,11 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
     channel
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, (payload) => {
+        if (payload.eventType === 'DELETE') {
+          notify('Room has been deleted.');
+          onRoomDeleted();
+          return;
+        }
         setRoom((payload.new as Room) ?? null);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'queue_items', filter: `room_id=eq.${roomId}` }, async () => {
@@ -1287,6 +1316,104 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
       setUploading(false);
       event.target.value = '';
     }
+  };
+
+  const reorderQueue = async (items: QueueItem[]) => {
+    if (!supabase) return false;
+    for (const [index, item] of items.entries()) {
+      const { error: updateError } = await supabase
+        .from('queue_items')
+        .update({ position: index + 1 })
+        .eq('id', item.id)
+        .eq('room_id', roomId);
+      if (updateError) {
+        logSupabaseError('queue_items', 'UPDATE position', updateError);
+        notify(`Unable to reorder queue: ${updateError.message}`);
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const handleRemoveSong = async (item: QueueItem) => {
+    if (!supabase || !isHost) return;
+    if (!window.confirm(`Remove "${item.title}" from this queue?`)) return;
+
+    const remainingItems = queue.filter((queueItem) => queueItem.id !== item.id);
+    const { error: deleteError } = await supabase
+      .from('queue_items')
+      .delete()
+      .eq('id', item.id)
+      .eq('room_id', roomId);
+    if (deleteError) {
+      logSupabaseError('queue_items', 'DELETE', deleteError);
+      notify(`Unable to remove song: ${deleteError.message}`);
+      return;
+    }
+
+    console.log('QUEUE DELETE', { roomId, queueItemId: item.id, mediaId: item.media_id });
+    const { error: storageError } = await supabase.storage.from('audio').remove([item.media_id]);
+    if (storageError) {
+      logSupabaseError('storage.objects (audio)', 'DELETE queue audio', storageError);
+    }
+
+    if (!await reorderQueue(remainingItems)) return;
+    setQueue(remainingItems.map((queueItem, index) => ({ ...queueItem, position: index + 1 })));
+
+    if (playback?.media_id === item.media_id) {
+      const nextItem = remainingItems.find((queueItem) => queueItem.position > item.position) ?? remainingItems[0];
+      if (nextItem) {
+        await updatePlayback({
+          media_id: nextItem.media_id,
+          title: nextItem.title,
+          artist: nextItem.artist,
+          artwork_url: nextItem.artwork_url,
+          is_playing: false,
+          position_ms: 0,
+          server_timestamp: new Date().toISOString(),
+        });
+      } else {
+        audioRef.current?.pause();
+        await updatePlayback({ media_id: null, title: null, artist: null, artwork_url: null, is_playing: false, position_ms: 0, server_timestamp: new Date().toISOString() });
+      }
+    }
+  };
+
+  const handleDeleteRoom = async () => {
+    if (!supabase || !isHost) return;
+    if (!window.confirm('Delete this room? This will remove the room and its queue.')) return;
+
+    const { error: playbackError } = await supabase.from('playback_state').delete().eq('room_id', roomId);
+    if (playbackError) {
+      logSupabaseError('playback_state', 'DELETE room playback', playbackError);
+      notify(`Unable to delete room: ${playbackError.message}`);
+      return;
+    }
+    const { error: queueError } = await supabase.from('queue_items').delete().eq('room_id', roomId);
+    if (queueError) {
+      logSupabaseError('queue_items', 'DELETE room queue', queueError);
+      notify(`Unable to delete room: ${queueError.message}`);
+      return;
+    }
+    const { data: audioObjects, error: listError } = await supabase.storage.from('audio').list(roomId);
+    if (listError) {
+      logSupabaseError('storage.objects (audio)', 'LIST room audio', listError);
+    } else if (audioObjects?.length) {
+      const { error: storageError } = await supabase.storage.from('audio').remove(audioObjects.map((object) => `${roomId}/${object.name}`));
+      if (storageError) {
+        logSupabaseError('storage.objects (audio)', 'DELETE room audio', storageError);
+      }
+    }
+    const { error: roomError } = await supabase.from('rooms').delete().eq('id', roomId).eq('host_id', userId);
+    if (roomError) {
+      logSupabaseError('rooms', 'DELETE', roomError);
+      notify(`Unable to delete room: ${roomError.message}`);
+      return;
+    }
+
+    console.log('ROOM DELETE', { roomId });
+    notify('Room deleted');
+    onRoomDeleted();
   };
 
   const updatePlayback = async (nextState: Partial<PlaybackState>) => {
@@ -1523,6 +1650,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
           <button className="secondary-button" onClick={() => navigator.clipboard?.writeText(`${window.location.origin}/room/${room.id}`)}>
             <Share2 size={15} />Share Room
           </button>
+          {isHost && <button className="danger-button" onClick={() => void handleDeleteRoom()}>Delete Room</button>}
           <button className="secondary-button" onClick={() => notify('QR modal ready')}>Show QR</button>
         </div>
       </div>
@@ -1628,14 +1756,17 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
               <div className="empty-state compact"><p>No songs in the queue yet.</p></div>
             ) : (
               queue.map((item, index) => (
-                <button key={item.id} className={currentItem?.id === item.id ? 'queue-item active' : 'queue-item'} onClick={() => void handleSelectTrack(item)}>
-                  <span className="queue-index">{String(index + 1).padStart(2, '0')}</span>
-                  <div>
-                    <strong>{item.title}</strong>
-                    <small>{item.artist || 'Local audio'}</small>
-                  </div>
-                  <span>{formatTime(item.duration_ms ?? 0)}</span>
-                </button>
+                <div key={item.id} className="queue-item-wrap">
+                  <button className={currentItem?.id === item.id ? 'queue-item active' : 'queue-item'} onClick={() => void handleSelectTrack(item)}>
+                    <span className="queue-index">{String(index + 1).padStart(2, '0')}</span>
+                    <div>
+                      <strong>{item.title}</strong>
+                      <small>{item.artist || 'Local audio'}</small>
+                    </div>
+                    <span>{formatTime(item.duration_ms ?? 0)}</span>
+                  </button>
+                  {isHost && <button className="queue-remove" aria-label={`Remove ${item.title}`} onClick={() => void handleRemoveSong(item)}><X size={14} /></button>}
+                </div>
               ))
             )}
           </div>
