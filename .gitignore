@@ -8,3 +8,5 @@ dist/
 *.log
 .vscode/
 .DS_Store
+.vercel
+.env*

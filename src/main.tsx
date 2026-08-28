@@ -988,6 +988,8 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
   const [uploading, setUploading] = useState(false);
   const [songReady, setSongReady] = useState<string>('');
   const [audioDuration, setAudioDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastSyncRef = useRef(0);
@@ -1004,9 +1006,33 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
     if (audio.src !== nextSource) {
       audio.src = nextSource;
+      setCurrentTime(0);
+      setAudioDuration(0);
       audio.load();
     }
     return nextSource;
+  };
+
+  const waitForAudioReady = (audio: HTMLAudioElement) => {
+    if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const handleReady = () => {
+        cleanup();
+        resolve();
+      };
+      const handleError = () => {
+        cleanup();
+        reject(new Error('The audio source could not be loaded.'));
+      };
+      const cleanup = () => {
+        audio.removeEventListener('canplay', handleReady);
+        audio.removeEventListener('canplaythrough', handleReady);
+        audio.removeEventListener('error', handleError);
+      };
+      audio.addEventListener('canplay', handleReady);
+      audio.addEventListener('canplaythrough', handleReady);
+      audio.addEventListener('error', handleError);
+    });
   };
 
   const syncActiveSource = async () => {
@@ -1032,6 +1058,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
           networkState: audio.networkState,
         });
         try {
+          await waitForAudioReady(audio);
           await audio.play();
           setAutoplayBlocked(false);
         } catch (playError) {
@@ -1301,7 +1328,8 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
   const handlePlayPause = async () => {
     if (!audioRef.current || !currentItem) return;
 
-    const shouldPlay = !(playback?.is_playing ?? false);
+    if (!isHost) return;
+    const shouldPlay = audioRef.current.paused;
     if (shouldPlay) {
       const audioUrl = loadCurrentAudio();
       if (!audioUrl) {
@@ -1311,7 +1339,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
         return;
       }
       const audio = audioRef.current;
-      const currentTime = audio.currentTime || Number(playback?.position_ms || 0) / 1000;
+      const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : Number(playback?.position_ms || 0) / 1000;
       audio.currentTime = currentTime;
       console.log('PLAYBACK DEBUG', {
         song: currentItem,
@@ -1321,6 +1349,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
         networkState: audio.networkState,
       });
       try {
+        await waitForAudioReady(audio);
         await audio.play();
         setAutoplayBlocked(false);
       } catch (playError) {
@@ -1340,7 +1369,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
         sequence_number: (playback?.sequence_number ?? 0) + 1,
       });
     } else {
-      const currentTime = audioRef.current.currentTime || Number(playback?.position_ms || 0) / 1000;
+      const currentTime = Number.isFinite(audioRef.current.currentTime) ? audioRef.current.currentTime : Number(playback?.position_ms || 0) / 1000;
       await updatePlayback({
         media_id: currentItem.media_id,
         title: currentItem.title,
@@ -1371,6 +1400,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
       networkState: audio.networkState,
     });
     try {
+      await waitForAudioReady(audio);
       await audio.play();
       setAutoplayBlocked(false);
     } catch (playError) {
@@ -1393,27 +1423,61 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
     });
   };
 
+  const handleAdjacentTrack = async (direction: -1 | 1) => {
+    if (!isHost || queue.length < 2 || !currentItem) return;
+    const currentIndex = queue.findIndex((item) => item.id === currentItem.id);
+    const nextItem = queue[currentIndex + direction];
+    if (!nextItem) return;
+
+    const source = getPublicStorageUrl(nextItem.media_id);
+    const audio = audioRef.current;
+    if (!audio || !source || source.startsWith('blob:') || source.startsWith('file:')) return;
+
+    audio.src = source;
+    audio.load();
+    setCurrentTime(0);
+    setAudioDuration(0);
+    try {
+      await waitForAudioReady(audio);
+      await audio.play();
+      setAutoplayBlocked(false);
+      await updatePlayback({
+        media_id: nextItem.media_id,
+        title: nextItem.title,
+        artist: nextItem.artist,
+        artwork_url: nextItem.artwork_url,
+        is_playing: true,
+        position_ms: 0,
+        server_timestamp: new Date().toISOString(),
+      });
+    } catch (playError) {
+      console.error('AUDIO PLAY ERROR', playError);
+      setAutoplayBlocked(true);
+      notify(`Unable to play this audio: ${playError instanceof Error ? playError.message : String(playError)}`);
+    }
+  };
+
   const handleSeek = async (value: number) => {
-    if (!audioRef.current) return;
+    if (!audioRef.current || !isHost) return;
     const seekTime = value;
     audioRef.current.currentTime = seekTime;
-    if (isHost) {
-      await updatePlayback({
-        media_id: currentItem?.media_id ?? null,
-        title: currentItem?.title ?? null,
-        artist: currentItem?.artist ?? null,
-        artwork_url: currentItem?.artwork_url ?? null,
-        is_playing: playback?.is_playing ?? false,
-        position_ms: Math.round(seekTime * 1000),
-        server_timestamp: new Date().toISOString(),
-        sequence_number: (playback?.sequence_number ?? 0) + 1,
-      });
-    }
+    setCurrentTime(seekTime);
+    await updatePlayback({
+      media_id: currentItem?.media_id ?? null,
+      title: currentItem?.title ?? null,
+      artist: currentItem?.artist ?? null,
+      artwork_url: currentItem?.artwork_url ?? null,
+      is_playing: !audioRef.current.paused,
+      position_ms: Math.round(seekTime * 1000),
+      server_timestamp: new Date().toISOString(),
+    });
   };
 
   const handleTimeUpdate = async () => {
     const audio = audioRef.current;
-    if (!audio || !isHost) return;
+    if (!audio) return;
+    setCurrentTime(audio.currentTime);
+    if (!isHost) return;
     const positionInfo = Math.round(audio.currentTime * 1000);
     if (Date.now() - lastSyncRef.current > 1500) {
       lastSyncRef.current = Date.now();
@@ -1439,7 +1503,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
   }
 
   const durationMs = audioDuration || (currentItem?.duration_ms ?? 0);
-  const progress = playback ? (Number(playback.position_ms || 0) / Math.max(durationMs, 1)) * 100 : 0;
+  const progress = (currentTime / Math.max(durationMs / 1000, 1)) * 100;
 
   return (
     <div className="room-content fade-in">
@@ -1484,17 +1548,17 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
           <div className="progress-wrap">
             <div className="progress-bar"><span style={{ width: `${Math.min(Math.max(progress, 0), 100)}%` }} /></div>
             <div className="progress-times">
-              <span>{formatTime(Number(playback?.position_ms || 0))}</span>
+              <span>{formatTime(currentTime * 1000)}</span>
               <span>{formatTime(durationMs || 0)}</span>
             </div>
           </div>
 
           <div className="player-controls">
-            <button className="icon-button small" aria-label="Previous song"><SkipBack size={18} /></button>
-            <button className="play-button" aria-label={playback?.is_playing ? 'Pause' : 'Play'} onClick={handlePlayPause}>
-              {playback?.is_playing ? <Pause size={18} /> : <Play size={18} />}
+            <button className="icon-button small" aria-label="Previous song" onClick={() => void handleAdjacentTrack(-1)} disabled={!isHost || queue.length < 2}><SkipBack size={18} /></button>
+            <button className="play-button" aria-label={isAudioPlaying ? 'Pause' : 'Play'} onClick={() => void handlePlayPause()} disabled={!isHost || !currentItem}>
+              {isAudioPlaying ? <Pause size={18} /> : <Play size={18} />}
             </button>
-            <button className="icon-button small" aria-label="Next song"><SkipForward size={18} /></button>
+            <button className="icon-button small" aria-label="Next song" onClick={() => void handleAdjacentTrack(1)} disabled={!isHost || queue.length < 2}><SkipForward size={18} /></button>
           </div>
 
           {autoplayBlocked && <button className="secondary-button full" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button>}
@@ -1507,7 +1571,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
               min={0}
               max={Math.max(durationMs / 1000, 1)}
               step={0.1}
-              value={Number(playback?.position_ms || 0) / 1000}
+              value={currentTime}
               onChange={(event) => void handleSeek(Number(event.target.value))}
               disabled={!isHost}
             />
@@ -1515,11 +1579,20 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
           <audio
             ref={audioRef}
-            onLoadedMetadata={(event) => setAudioDuration((event.currentTarget.duration || 0) * 1000)}
+            onLoadedMetadata={(event) => {
+              setAudioDuration((event.currentTarget.duration || 0) * 1000);
+              setCurrentTime(event.currentTarget.currentTime || 0);
+            }}
             onTimeUpdate={handleTimeUpdate}
             onCanPlay={() => console.log('AUDIO CAN PLAY', audioRef.current?.src)}
-            onPlay={() => console.log('AUDIO PLAY', audioRef.current?.src)}
-            onPause={() => console.log('AUDIO PAUSE', audioRef.current?.src)}
+            onPlay={() => {
+              setIsAudioPlaying(true);
+              console.log('AUDIO PLAY', audioRef.current?.src);
+            }}
+            onPause={() => {
+              setIsAudioPlaying(false);
+              console.log('AUDIO PAUSE', audioRef.current?.src);
+            }}
             onWaiting={() => console.log('AUDIO WAITING', audioRef.current?.src)}
             onCanPlayThrough={() => console.log('AUDIO CAN PLAY THROUGH', audioRef.current?.src)}
             onError={(event) => {
@@ -1532,7 +1605,10 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
               });
               notify(`Unable to play this audio: ${audio.error?.message || 'The audio file could not be loaded.'}`);
             }}
-            onEnded={() => void updatePlayback({ is_playing: false, position_ms: 0, server_timestamp: new Date().toISOString() })}
+            onEnded={() => {
+              setIsAudioPlaying(false);
+              void handleAdjacentTrack(1);
+            }}
           />
         </section>
 
