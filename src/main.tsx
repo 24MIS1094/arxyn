@@ -858,6 +858,13 @@ function JoinRoom({ close, openRoom, notify }: { close: () => void; openRoom: (i
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const getJoinErrorMessage = (joinError: { message?: string }) => {
+    const message = joinError.message?.toUpperCase() || '';
+    if (message.includes('AUTH_REQUIRED')) return 'Please log in before joining a room.';
+    if (message.includes('ROOM_NOT_FOUND')) return 'Room not found. Please check the room code.';
+    return 'Unable to join room. Please check the room code.';
+  };
+
   const join = async () => {
     if (!supabase) {
       setError('Supabase is not configured.');
@@ -878,8 +885,9 @@ function JoinRoom({ close, openRoom, notify }: { close: () => void; openRoom: (i
       .maybeSingle();
 
     if (roomError) {
+      logSupabaseError('rooms', 'SELECT room by code', roomError);
       setBusy(false);
-      setError(roomError.message);
+      setError('Unable to find this room. Please check the room code.');
       return;
     }
 
@@ -896,14 +904,14 @@ function JoinRoom({ close, openRoom, notify }: { close: () => void; openRoom: (i
       return;
     }
 
-    const { error: memberError } = await supabase
-      .from('room_members')
-      .upsert({ room_id: room.id, user_id: authUser.user.id, role: 'member' }, { onConflict: 'room_id,user_id' });
+    const { data: joined, error: memberError } = await supabase.rpc('join_room', { p_room_id: room.id });
 
     setBusy(false);
 
-    if (memberError) {
-      setError(memberError.message);
+    if (memberError || joined !== true) {
+      const joinError = memberError ?? { message: 'The room join was not confirmed.' };
+      logSupabaseError('join_room RPC', 'JOIN room by code', joinError);
+      setError(getJoinErrorMessage(joinError));
       return;
     }
 
@@ -1153,19 +1161,22 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
         .maybeSingle();
 
       if (roomError || !roomData) {
-        setError('Room not found or unavailable.');
+        if (!roomData) {
+          setError('Room no longer exists.');
+        } else {
+          logSupabaseError('rooms', 'SELECT room', roomError ?? { message: 'Unknown room query error.' });
+          setError('Unable to load this room. Please try again.');
+        }
         return;
       }
 
       setRoom(roomData as Room);
 
       if (roomData.host_id !== userId) {
-        const { error: membershipError } = await client
-          .from('room_members')
-          .upsert({ room_id: roomId, user_id: userId, role: 'member' }, { onConflict: 'room_id,user_id' });
+        const { error: membershipError } = await client.rpc('join_room', { p_room_id: roomId });
         if (membershipError) {
-          logSupabaseError('room_members', 'UPSERT direct-link membership', membershipError);
-          setError(`Unable to join room: ${membershipError.message}`);
+          logSupabaseError('join_room RPC', 'JOIN room', membershipError);
+          setError('Unable to join this room. Please try again.');
           return;
         }
       }
@@ -1217,25 +1228,25 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       if (memberError) {
         logSupabaseError('room_members', 'SELECT room members', memberError);
         setMembers([]);
-        return;
-      }
-      const userIds = [...new Set((memberRows ?? []).map((member) => member.user_id))];
-      const { data: profileRows, error: profileError } = userIds.length
-        ? await client.from('profiles').select('id, name, email').in('id', userIds)
-        : { data: [], error: null };
+      } else {
+        const userIds = [...new Set((memberRows ?? []).map((member) => member.user_id))];
+        const { data: profileRows, error: profileError } = userIds.length
+          ? await client.from('profiles').select('id, name, email').in('id', userIds)
+          : { data: [], error: null };
 
-      if (profileError) {
-        logSupabaseError('profiles', 'SELECT room profiles', profileError);
-      }
+        if (profileError) {
+          logSupabaseError('profiles', 'SELECT room profiles', profileError);
+        }
 
-      const profileMap = new Map((profileRows ?? []).map((profile) => [profile.id, profile]));
-      const mappedMembers = (memberRows ?? []).map((member) => ({
-        user_id: member.user_id,
-        role: member.role,
-        joined_at: member.joined_at,
-        display_name: profileMap.get(member.user_id)?.name || profileMap.get(member.user_id)?.email || 'User',
-      }));
-      setMembers(mappedMembers);
+        const profileMap = new Map((profileRows ?? []).map((profile) => [profile.id, profile]));
+        const mappedMembers = (memberRows ?? []).map((member) => ({
+          user_id: member.user_id,
+          role: member.role,
+          joined_at: member.joined_at,
+          display_name: profileMap.get(member.user_id)?.name || profileMap.get(member.user_id)?.email || 'User',
+        }));
+        setMembers(mappedMembers);
+      }
     };
 
     void loadRoom();
