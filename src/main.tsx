@@ -59,6 +59,8 @@ const googleAuthRedirectUrl = new URL('/auth/callback', `${appBaseUrl}/`).toStri
 const getAuthRedirectUrl = (path: string) => new URL(path, `${appBaseUrl}/`).toString();
 const gradient = 'linear-gradient(135deg, rgba(137, 168, 255, 0.24), rgba(255, 128, 102, 0.2) 40%, rgba(122, 89, 255, 0.18));';
 const audioBucket = 'audio';
+const allowedAudioMimeTypes = new Set(['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/aac', 'audio/ogg', 'audio/webm']);
+const allowedAudioExtensions = new Set(['mp3', 'wav', 'm4a', 'aac', 'ogg', 'webm']);
 
 type SupabaseErrorLike = {
   code?: string;
@@ -93,11 +95,22 @@ const getPublicStorageUrl = (path: string) => {
   if (!supabase) return path;
   if (!path || path.startsWith('http://') || path.startsWith('https://') || path.startsWith('blob:')) return path;
   try {
-    const { data } = supabase.storage.from(audioBucket).getPublicUrl(path);
+    const { data } = supabase.storage.from('audio').getPublicUrl(path);
     return data?.publicUrl || path;
   } catch {
     return path;
   }
+};
+
+const getSafeAudioFileName = (fileName: string) => {
+  const extension = fileName.includes('.') ? `.${fileName.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'audio'}` : '.audio';
+  const baseName = fileName.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'audio';
+  return `${baseName}${extension}`;
+};
+
+const isAudioFile = (file: File) => {
+  const extension = file.name.split('.').pop()?.toLowerCase() || '';
+  return allowedAudioMimeTypes.has(file.type) || file.type.startsWith('audio/') || allowedAudioExtensions.has(extension);
 };
 
 const getDisplayRoomName = (room: Room) => room.name || 'Untitled room';
@@ -1129,11 +1142,37 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
     try {
       for (const file of files) {
-        const storagePath = `rooms/${roomId}/${Date.now()}-${file.name}`;
+        if (!isAudioFile(file)) {
+          const message = `${file.name} is not a supported audio file.`;
+          notify(message);
+          setSongReady(message);
+          continue;
+        }
+
+        const safeFileName = getSafeAudioFileName(file.name);
+        const storagePath = `${roomId}/${crypto.randomUUID()}-${safeFileName}`;
+        console.log('AUDIO UPLOAD DEBUG', {
+          bucket: audioBucket,
+          fileName: file.name,
+          fileType: file.type,
+          fileSize: file.size,
+          path: storagePath,
+        });
         console.log('Uploading audio to bucket:', audioBucket);
-        const { data: uploadedFile, error: uploadError } = await supabase.storage.from(audioBucket).upload(storagePath, file, { cacheControl: '3600', upsert: false });
+        const { data: uploadedFile, error: uploadError } = await supabase.storage.from('audio').upload(storagePath, file, { cacheControl: '3600', upsert: false });
 
         if (uploadError) {
+          const errorDetails = uploadError as unknown as Record<string, unknown>;
+          console.error('AUDIO STORAGE UPLOAD ERROR', {
+            name: errorDetails.name,
+            message: errorDetails.message,
+            status: errorDetails.status,
+            statusCode: errorDetails.statusCode,
+            error: errorDetails.error,
+            cause: errorDetails.cause,
+            raw: uploadError,
+            json: JSON.stringify(errorDetails),
+          });
           logSupabaseError(`storage.objects (${audioBucket})`, 'INSERT/upload', uploadError);
           const message = uploadError.message.toLowerCase().includes('bucket not found')
             ? "Audio storage is not configured. Please create the 'audio' storage bucket in Supabase."
@@ -1177,7 +1216,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
         if (insertError) {
           logSupabaseError('queue_items', 'INSERT', insertError);
-          const { error: cleanupError } = await supabase.storage.from(audioBucket).remove([uploadedPath]);
+          const { error: cleanupError } = await supabase.storage.from('audio').remove([uploadedPath]);
           if (cleanupError) {
             logSupabaseError(`storage.objects (${audioBucket})`, 'DELETE orphaned upload', cleanupError);
           }
