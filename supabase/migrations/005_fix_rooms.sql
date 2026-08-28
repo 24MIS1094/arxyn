@@ -8,18 +8,59 @@ create table if not exists public.rooms (
   owner_id uuid not null references auth.users(id) on delete cascade,
   capacity integer not null default 10 check (capacity between 1 and 1000),
   privacy text not null default 'private' check (privacy in ('private', 'public')),
-  host_id uuid generated always as (owner_id) stored,
-  max_participants integer generated always as (capacity) stored,
-  visibility text generated always as (privacy) stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
-create unique index if not exists rooms_code_unique_idx
-on public.rooms (lower(code));
+alter table public.rooms add column if not exists code text;
+alter table public.rooms add column if not exists name text;
+alter table public.rooms add column if not exists description text;
+alter table public.rooms add column if not exists owner_id uuid;
+alter table public.rooms add column if not exists capacity integer;
+alter table public.rooms add column if not exists privacy text;
+alter table public.rooms add column if not exists created_at timestamptz;
+alter table public.rooms add column if not exists updated_at timestamptz;
 
-create index if not exists rooms_owner_idx
-on public.rooms (owner_id);
+update public.rooms
+set code = upper(substr(md5(random()::text), 1, 6))
+where code is null or code = '';
+
+update public.rooms
+set name = 'Untitled room'
+where name is null;
+
+update public.rooms
+set capacity = 10
+where capacity is null;
+
+update public.rooms
+set privacy = 'private'
+where privacy is null;
+
+update public.rooms
+set created_at = now()
+where created_at is null;
+
+update public.rooms
+set updated_at = now()
+where updated_at is null;
+
+alter table public.rooms
+  alter column code set default upper(substr(md5(random()::text), 1, 6)),
+  alter column code set not null,
+  alter column name set not null,
+  alter column owner_id set not null,
+  alter column capacity set default 10,
+  alter column capacity set not null,
+  alter column privacy set default 'private',
+  alter column privacy set not null,
+  alter column created_at set default now(),
+  alter column created_at set not null,
+  alter column updated_at set default now(),
+  alter column updated_at set not null;
+
+create unique index if not exists rooms_code_unique_idx on public.rooms (lower(code));
+create index if not exists rooms_owner_idx on public.rooms (owner_id);
 
 create table if not exists public.room_members (
   id uuid primary key default gen_random_uuid(),
@@ -30,11 +71,8 @@ create table if not exists public.room_members (
   unique (room_id, user_id)
 );
 
-create index if not exists room_members_room_idx
-on public.room_members (room_id);
-
-create index if not exists room_members_user_idx
-on public.room_members (user_id);
+create index if not exists room_members_room_idx on public.room_members (room_id);
+create index if not exists room_members_user_idx on public.room_members (user_id);
 
 alter table public.rooms enable row level security;
 alter table public.room_members enable row level security;
@@ -82,8 +120,7 @@ using (
   or exists (
     select 1
     from public.room_members rm
-    where rm.room_id = public.rooms.id
-      and rm.user_id = auth.uid()
+    where rm.room_id = public.rooms.id and rm.user_id = auth.uid()
   )
 );
 
@@ -111,8 +148,7 @@ using (
   or exists (
     select 1
     from public.rooms r
-    where r.id = public.room_members.room_id
-      and (r.owner_id = auth.uid() or r.privacy = 'public')
+    where r.id = public.room_members.room_id and (r.owner_id = auth.uid() or r.privacy = 'public')
   )
 );
 
@@ -131,8 +167,7 @@ with check (
         or exists (
           select 1
           from public.room_members rm
-          where rm.room_id = r.id
-            and rm.user_id = auth.uid()
+          where rm.room_id = r.id and rm.user_id = auth.uid()
         )
       )
   )
@@ -145,7 +180,6 @@ using (
   exists (
     select 1
     from public.rooms r
-    where r.id = public.room_members.room_id
-      and r.owner_id = auth.uid()
+    where r.id = public.room_members.room_id and r.owner_id = auth.uid()
   )
 );

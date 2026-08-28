@@ -59,6 +59,8 @@ const googleAuthRedirectUrl = new URL('/auth/callback', `${appBaseUrl}/`).toStri
 const getAuthRedirectUrl = (path: string) => new URL(path, `${appBaseUrl}/`).toString();
 const gradient = 'linear-gradient(135deg, rgba(137, 168, 255, 0.24), rgba(255, 128, 102, 0.2) 40%, rgba(122, 89, 255, 0.18));';
 
+const roomSelectColumns = 'id, name, description, code, owner_id, capacity, privacy, created_at';
+
 const generateRoomCode = () => Math.random().toString(36).slice(2, 8).toUpperCase().padEnd(6, 'A');
 
 const formatTime = (valueMs: number) => {
@@ -479,7 +481,7 @@ function Home({ setModal, openRoom, userId }: { setModal: (modal: 'create' | 'jo
 
       const { data, error } = await supabase
         .from('rooms')
-        .select('id, name, description, code, capacity, owner_id, privacy, created_at')
+        .select(roomSelectColumns)
         .eq('owner_id', userId)
         .order('created_at', { ascending: false });
 
@@ -610,7 +612,7 @@ function Rooms({ userId, setModal, openRoom }: { userId: string; setModal: (moda
 
       const { data, error } = await supabase
         .from('rooms')
-        .select('id, name, description, code, capacity, owner_id, privacy, created_at')
+        .select(roomSelectColumns)
         .eq('owner_id', userId)
         .order('created_at', { ascending: false });
 
@@ -690,33 +692,54 @@ function CreateRoom({ userId, close, openRoom, notify }: { userId: string; close
       return;
     }
 
-    const nextCode = generateRoomCode();
+    let nextCode = generateRoomCode();
     setBusy(true);
 
-    const { data, error: insertError } = await supabase
-      .from('rooms')
-      .insert({
-        owner_id: userId,
-        name: name.trim(),
-        description: description.trim() || null,
-        capacity: Number(capacity || 10),
-        privacy,
-        code: nextCode,
-      })
-      .select('id')
-      .single();
+    try {
+      let uniqueCode = nextCode;
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const { data: existingRoom } = await supabase
+          .from('rooms')
+          .select('id')
+          .eq('code', uniqueCode)
+          .maybeSingle();
 
-    setBusy(false);
+        if (!existingRoom) {
+          break;
+        }
 
-    if (insertError) {
-      setError(insertError.message);
-      console.error('Create room error', insertError);
-      return;
+        uniqueCode = generateRoomCode();
+      }
+
+      const { data, error: insertError } = await supabase
+        .from('rooms')
+        .insert({
+          owner_id: userId,
+          name: name.trim(),
+          description: description.trim() || null,
+          capacity: Number(capacity || 10),
+          privacy,
+          code: uniqueCode,
+        })
+        .select(roomSelectColumns)
+        .single();
+
+      if (insertError) {
+        setError(insertError.message);
+        console.error('Create room error', insertError);
+        return;
+      }
+
+      close();
+      notify('Room created');
+      if (data?.id) openRoom(data.id);
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : 'Room creation failed.';
+      setError(message);
+      console.error('Create room failure', caughtError);
+    } finally {
+      setBusy(false);
     }
-
-    close();
-    notify('Room created');
-    if (data?.id) openRoom(data.id);
   };
 
   return (
@@ -775,7 +798,7 @@ function JoinRoom({ close, openRoom, notify }: { close: () => void; openRoom: (i
     setBusy(true);
     const { data: room, error: roomError } = await supabase
       .from('rooms')
-      .select('id, name, code, capacity, owner_id, privacy')
+      .select(roomSelectColumns)
       .eq('code', normalized)
       .maybeSingle();
 
@@ -975,7 +998,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
       const { data: roomData, error: roomError } = await client
         .from('rooms')
-        .select('id, name, description, code, capacity, owner_id, privacy, created_at')
+        .select(roomSelectColumns)
         .eq('id', roomId)
         .maybeSingle();
 
