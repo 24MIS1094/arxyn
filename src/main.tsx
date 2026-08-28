@@ -30,7 +30,7 @@ type QueueItem = {
   duration_ms: number | null;
   source_type: string | null;
   created_at: string;
-  added_by?: string | null;
+  requested_by?: string | null;
 };
 
 type PlaybackState = {
@@ -59,6 +59,24 @@ const googleAuthRedirectUrl = new URL('/auth/callback', `${appBaseUrl}/`).toStri
 const getAuthRedirectUrl = (path: string) => new URL(path, `${appBaseUrl}/`).toString();
 const gradient = 'linear-gradient(135deg, rgba(137, 168, 255, 0.24), rgba(255, 128, 102, 0.2) 40%, rgba(122, 89, 255, 0.18));';
 const audioBucket = 'audio';
+
+type SupabaseErrorLike = {
+  code?: string;
+  message: string;
+  details?: string;
+  hint?: string;
+};
+
+const logSupabaseError = (table: string, operation: string, error: SupabaseErrorLike) => {
+  console.error('Supabase error', {
+    table,
+    operation,
+    code: error.code,
+    message: error.message,
+    details: error.details,
+    hint: error.hint,
+  });
+};
 
 const roomSelectColumns = 'id, name, description, code, host_id, max_participants, visibility, created_at';
 
@@ -1012,7 +1030,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
 
       const { data: queueData } = await client
         .from('queue_items')
-        .select('id, room_id, media_id, title, artist, artwork_url, position, duration_ms, source_type, created_at, added_by')
+        .select('id, room_id, media_id, title, artist, artwork_url, position, duration_ms, source_type, created_at, requested_by')
         .eq('room_id', roomId)
         .order('position', { ascending: true });
 
@@ -1071,7 +1089,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
         setRoom((payload.new as Room) ?? null);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'queue_items', filter: `room_id=eq.${roomId}` }, async () => {
-        const { data } = await client.from('queue_items').select('id, room_id, media_id, title, artist, artwork_url, position, duration_ms, source_type, created_at, added_by').eq('room_id', roomId).order('position', { ascending: true });
+        const { data } = await client.from('queue_items').select('id, room_id, media_id, title, artist, artwork_url, position, duration_ms, source_type, created_at, requested_by').eq('room_id', roomId).order('position', { ascending: true });
         setQueue((data ?? []) as QueueItem[]);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'playback_state', filter: `room_id=eq.${roomId}` }, (payload) => {
@@ -1113,10 +1131,10 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
       for (const file of files) {
         const storagePath = `rooms/${roomId}/${Date.now()}-${file.name}`;
         console.log('Uploading audio to bucket:', audioBucket);
-        const { data: uploadedFile, error: uploadError } = await supabase.storage.from(audioBucket).upload(storagePath, file, { cacheControl: '3600', upsert: true });
+        const { data: uploadedFile, error: uploadError } = await supabase.storage.from(audioBucket).upload(storagePath, file, { cacheControl: '3600', upsert: false });
 
         if (uploadError) {
-          console.error('Upload error', uploadError);
+          logSupabaseError(`storage.objects (${audioBucket})`, 'INSERT/upload', uploadError);
           const message = uploadError.message.toLowerCase().includes('bucket not found')
             ? "Audio storage is not configured. Please create the 'audio' storage bucket in Supabase."
             : uploadError.message;
@@ -1141,7 +1159,7 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
           duration_ms: 0,
           source_type: 'device_file',
           created_at: new Date().toISOString(),
-          added_by: userId,
+          requested_by: userId,
         };
 
         const { error: insertError } = await supabase.from('queue_items').insert({
@@ -1151,15 +1169,20 @@ function Room({ roomId, userId, notify }: { roomId: string; userId: string; noti
           artist: item.artist,
           artwork_url: item.artwork_url,
           position: queue.length + 1,
-          added_by: userId,
+          requested_by: userId,
           source_type: 'device_file',
           duration_ms: item.duration_ms,
           status: 'queued',
         });
 
         if (insertError) {
-          console.error('Queue insert error', insertError);
-          notify(`Could not queue ${file.name}`);
+          logSupabaseError('queue_items', 'INSERT', insertError);
+          const { error: cleanupError } = await supabase.storage.from(audioBucket).remove([uploadedPath]);
+          if (cleanupError) {
+            logSupabaseError(`storage.objects (${audioBucket})`, 'DELETE orphaned upload', cleanupError);
+          }
+          notify(insertError.message);
+          setSongReady(insertError.message);
         } else {
           setSongReady(`${file.name} ready`);
         }
