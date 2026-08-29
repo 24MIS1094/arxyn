@@ -127,6 +127,15 @@ const getQueueAudioUrl = (item: Pick<QueueItem, 'media_id' | 'source_type'> | nu
   return getPublicStorageUrl(storagePath, audioBucket);
 };
 
+const getExpectedPlaybackPosition = (state: PlaybackState | null) => {
+  if (!state) return 0;
+  const positionMs = Number(state.position_ms ?? 0);
+  const timestampMs = Date.parse(state.server_timestamp ?? new Date().toISOString());
+  if (!Number.isFinite(timestampMs)) return positionMs / 1000;
+  const elapsedSeconds = state.is_playing ? (Date.now() - timestampMs) / 1000 : 0;
+  return Math.max(0, positionMs / 1000 + elapsedSeconds);
+};
+
 const getSafeAudioFileName = (fileName: string) => {
   const extension = fileName.includes('.') ? `.${fileName.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'audio'}` : '.audio';
   const baseName = fileName.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'audio';
@@ -1189,40 +1198,95 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
   const syncActiveSource = async () => {
     const audio = audioRef.current;
-    const nextSource = loadCurrentAudio();
-    if (!audio || !currentItem || !nextSource) return;
+    if (!audio || !currentItem || !playback || isHost) return;
 
-    if (playback) {
-      const elapsed = playback.is_playing
-        ? Math.max(0, (Date.now() - Date.parse(playback.server_timestamp)) / 1000)
-        : 0;
-      const target = Number(playback.position_ms || 0) / 1000 + elapsed;
-      const delta = Math.abs(audio.currentTime - target);
-      if (delta > 0.75) {
-        audio.currentTime = target;
-      }
-      if (playback.is_playing) {
-        console.log('PLAYBACK DEBUG', {
-          song: currentItem,
-          audioUrl: nextSource,
-          currentTime: audio.currentTime,
-          readyState: audio.readyState,
-          networkState: audio.networkState,
-        });
-        try {
-          await waitForAudioReady(audio);
+    const nextSource = getCurrentAudioUrl();
+    if (!nextSource || nextSource.startsWith('blob:') || nextSource.startsWith('file:')) return;
+    if (audio.src !== nextSource) {
+      audio.src = nextSource;
+      audio.load();
+      setCurrentTime(0);
+      setAudioDuration(0);
+    }
+
+    const expectedPosition = getExpectedPlaybackPosition(playback);
+    if (!Number.isFinite(expectedPosition)) return;
+
+    const delta = Math.abs(audio.currentTime - expectedPosition);
+    if (delta > 0.5) {
+      audio.currentTime = expectedPosition;
+    }
+
+    if (playback.is_playing) {
+      try {
+        await waitForAudioReady(audio);
+        if (audio.paused) {
           await audio.play();
-          setAutoplayBlocked(false);
-        } catch (playError) {
-          console.error('AUDIO PLAY ERROR', playError);
-          setAutoplayBlocked(true);
-          notify('Tap to Sync & Play');
         }
-      } else {
-        audio.pause();
+        setAutoplayBlocked(false);
+      } catch (playError) {
+        console.error('AUDIO PLAY ERROR', playError);
+        setAutoplayBlocked(true);
+        notify('Tap to Sync & Play');
       }
+    } else {
+      audio.pause();
     }
   };
+
+  useEffect(() => {
+    if (!playback || !currentItem || isHost) return;
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const expectedPosition = getExpectedPlaybackPosition(playback);
+    if (!Number.isFinite(expectedPosition)) return;
+
+    const drift = expectedPosition - audio.currentTime;
+    if (Math.abs(drift) > 0.5) {
+      audio.currentTime = expectedPosition;
+      setCurrentTime(expectedPosition);
+    }
+
+    if (playback.is_playing && audio.paused) {
+      void audio.play().catch(() => {
+        setAutoplayBlocked(true);
+      });
+    }
+
+    if (!playback.is_playing && !audio.paused) {
+      audio.pause();
+    }
+  }, [currentItem, playback, isHost]);
+
+  useEffect(() => {
+    if (!playback || !currentItem || isHost) return;
+
+    const syncInterval = window.setInterval(() => {
+      const audio = audioRef.current;
+      if (!audio) return;
+
+      const expectedPosition = getExpectedPlaybackPosition(playback);
+      const drift = expectedPosition - audio.currentTime;
+
+      if (Math.abs(drift) > 0.5) {
+        audio.currentTime = expectedPosition;
+        setCurrentTime(expectedPosition);
+      }
+
+      if (playback.is_playing) {
+        if (audio.paused) {
+          void audio.play().catch(() => {
+            setAutoplayBlocked(true);
+          });
+        }
+      } else if (!audio.paused) {
+        audio.pause();
+      }
+    }, 1200);
+
+    return () => window.clearInterval(syncInterval);
+  }, [currentItem, playback, isHost]);
 
   useEffect(() => {
     const loadRoom = async () => {
@@ -1325,6 +1389,9 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
         setQueue((data ?? []) as QueueItem[]);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'playback_state', filter: `room_id=eq.${roomId}` }, (payload) => {
+        if (!payload.new || payload.eventType === 'UPDATE' && isHost) {
+          return;
+        }
         setPlayback((payload.new as PlaybackState) ?? null);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_members', filter: `room_id=eq.${roomId}` }, () => {
@@ -1603,32 +1670,35 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
     if (error) {
       console.error('Playback sync error', error);
       notify(`Synchronization failed: ${error.message}`);
+      return;
     }
+
+    setPlayback(payload as PlaybackState);
   };
 
   const handlePlayPause = async () => {
-    if (!audioRef.current || !currentItem) return;
+    if (!audioRef.current || !currentItem || !isHost) return;
 
-    if (!isHost) return;
-    const shouldPlay = audioRef.current.paused;
+    const audio = audioRef.current;
+    const shouldPlay = audio.paused;
+
     if (shouldPlay) {
-      const audioUrl = loadCurrentAudio();
+      const audioUrl = getCurrentAudioUrl();
       if (!audioUrl) {
         const message = 'Unable to play this audio: no playable Storage URL is available.';
         console.error('AUDIO PLAY ERROR', message);
         notify(message);
         return;
       }
-      const audio = audioRef.current;
-      const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : Number(playback?.position_ms || 0) / 1000;
-      audio.currentTime = currentTime;
-      console.log('PLAYBACK DEBUG', {
-        song: currentItem,
-        audioUrl,
-        currentTime: audio.currentTime,
-        readyState: audio.readyState,
-        networkState: audio.networkState,
-      });
+
+      if (audio.src !== audioUrl) {
+        audio.src = audioUrl;
+        audio.load();
+      }
+
+      const nextPosition = Number.isFinite(audio.currentTime) ? audio.currentTime : Number(playback?.position_ms || 0) / 1000;
+      audio.currentTime = nextPosition;
+
       try {
         await waitForAudioReady(audio);
         await audio.play();
@@ -1639,18 +1709,22 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
         notify(`Unable to play this audio: ${playError instanceof Error ? playError.message : String(playError)}`);
         return;
       }
+
+      const hostTimestamp = new Date().toISOString();
       await updatePlayback({
         media_id: currentItem.media_id,
         title: currentItem.title,
         artist: currentItem.artist,
         artwork_url: currentItem.artwork_url,
         is_playing: true,
-        position_ms: Math.round(currentTime * 1000),
-        server_timestamp: new Date().toISOString(),
+        position_ms: Math.round(audio.currentTime * 1000),
+        server_timestamp: hostTimestamp,
         sequence_number: (playback?.sequence_number ?? 0) + 1,
       });
     } else {
-      const currentTime = Number.isFinite(audioRef.current.currentTime) ? audioRef.current.currentTime : Number(playback?.position_ms || 0) / 1000;
+      const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : Number(playback?.position_ms || 0) / 1000;
+      audio.pause();
+      const hostTimestamp = new Date().toISOString();
       await updatePlayback({
         media_id: currentItem.media_id,
         title: currentItem.title,
@@ -1658,31 +1732,33 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
         artwork_url: currentItem.artwork_url,
         is_playing: false,
         position_ms: Math.round(currentTime * 1000),
-        server_timestamp: new Date().toISOString(),
+        server_timestamp: hostTimestamp,
         sequence_number: (playback?.sequence_number ?? 0) + 1,
       });
-      audioRef.current.pause();
     }
   };
 
   const handleSyncAndPlay = async () => {
     const audio = audioRef.current;
-    const source = loadCurrentAudio();
-    if (!audio || !source || !playback || !currentItem) return;
-    const elapsed = playback.is_playing
-      ? Math.max(0, (Date.now() - Date.parse(playback.server_timestamp)) / 1000)
-      : 0;
-    audio.currentTime = Number(playback.position_ms || 0) / 1000 + elapsed;
-    console.log('PLAYBACK DEBUG', {
-      song: currentItem,
-      audioUrl: source,
-      currentTime: audio.currentTime,
-      readyState: audio.readyState,
-      networkState: audio.networkState,
-    });
+    if (!audio || !playback || !currentItem) return;
+
+    const source = getCurrentAudioUrl();
+    if (!source || source.startsWith('blob:') || source.startsWith('file:')) return;
+    if (audio.src !== source) {
+      audio.src = source;
+      audio.load();
+    }
+
+    const expectedPosition = getExpectedPlaybackPosition(playback);
+    audio.currentTime = expectedPosition;
+
     try {
       await waitForAudioReady(audio);
-      await audio.play();
+      if (playback.is_playing) {
+        await audio.play();
+      } else {
+        audio.pause();
+      }
       setAutoplayBlocked(false);
     } catch (playError) {
       console.error('AUDIO PLAY ERROR', playError);
@@ -1692,14 +1768,15 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
   const handleSelectTrack = async (item: QueueItem) => {
     if (!isHost) return;
+    const hostTimestamp = new Date().toISOString();
     await updatePlayback({
       media_id: item.media_id,
       title: item.title,
       artist: item.artist,
       artwork_url: item.artwork_url,
-      is_playing: false,
+      is_playing: playback?.is_playing ?? false,
       position_ms: 0,
-      server_timestamp: new Date().toISOString(),
+      server_timestamp: hostTimestamp,
       sequence_number: (playback?.sequence_number ?? 0) + 1,
     });
   };
@@ -1714,20 +1791,25 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
     const audio = audioRef.current;
     if (!audio || !source || source.startsWith('blob:') || source.startsWith('file:')) return;
 
+    const shouldKeepPlaying = playback?.is_playing ?? false;
     audio.src = source;
     audio.load();
     setCurrentTime(0);
     setAudioDuration(0);
     try {
       await waitForAudioReady(audio);
-      await audio.play();
+      if (shouldKeepPlaying) {
+        await audio.play();
+      } else {
+        audio.pause();
+      }
       setAutoplayBlocked(false);
       await updatePlayback({
         media_id: nextItem.media_id,
         title: nextItem.title,
         artist: nextItem.artist,
         artwork_url: nextItem.artwork_url,
-        is_playing: true,
+        is_playing: shouldKeepPlaying,
         position_ms: 0,
         server_timestamp: new Date().toISOString(),
       });
@@ -1748,7 +1830,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       title: currentItem?.title ?? null,
       artist: currentItem?.artist ?? null,
       artwork_url: currentItem?.artwork_url ?? null,
-      is_playing: !audioRef.current.paused,
+      is_playing: playback?.is_playing ?? !audioRef.current.paused,
       position_ms: Math.round(seekTime * 1000),
       server_timestamp: new Date().toISOString(),
     });
