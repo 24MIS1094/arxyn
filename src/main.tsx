@@ -1118,6 +1118,15 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
   const isHost = room?.host_id === userId;
   const currentItem = queue.find((item) => playback && item.media_id === playback.media_id) ?? queue[0] ?? null;
   const roomUrl = getRoomUrl(roomId);
+  const connectedListeners = presenceUsers.filter((presenceUser) => presenceUser.user_id !== room?.host_id);
+  const visibleMembers = connectedListeners.length
+    ? connectedListeners.map((presenceUser) => ({
+        user_id: presenceUser.user_id,
+        role: presenceUser.is_host ? 'owner' : 'member',
+        joined_at: new Date(presenceUser.joined_at).toISOString(),
+        display_name: presenceUser.display_name,
+      }))
+    : members.filter((member) => member.user_id !== room?.host_id);
 
   const normalizePresenceUsers = (presenceState: Record<string, Array<Record<string, unknown>>> | undefined) => {
     const entries = Object.values(presenceState ?? {}).flatMap((value) => value ?? []);
@@ -2211,7 +2220,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
   const durationMs = audioDuration || (currentItem?.duration_ms ?? 0);
   const progress = (currentTime / Math.max(durationMs / 1000, 1)) * 100;
-  const listeningNow = presenceUsers.length || members.length || 1;
+  const listeningNow = connectedListeners.length;
 
   return (
     <div className="room-content fade-in">
@@ -2221,40 +2230,45 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           <h1>{room.name}</h1>
           <div className="room-meta">
             <span className={`room-state ${connectionStatus === 'connected' ? 'online' : connectionStatus === 'reconnecting' ? 'reconnecting' : 'offline'}`}><i />{connectionStatus === 'connected' ? 'Connected' : connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Disconnected'}</span>
-            <span><Users size={14} /> {listeningNow} listening</span>
-            <span className="code-box">{room.code}</span>
+            <span><Users size={14} /> {listeningNow} connected</span>
+            {!isHost && <span className="code-box">Room Active</span>}
+            {isHost && <span className="code-box">{room.code}</span>}
           </div>
         </div>
 
-        <div className="header-actions">
-          <button className="secondary-button" onClick={() => void copyText(room.code, 'Room code copied!')}> <Copy size={15} />Copy Code</button>
-          <button className="secondary-button" onClick={() => void handleShareRoom()}>
-            <Share2 size={15} />Share Room
-          </button>
-          {isHost && <button className="danger-button" onClick={() => void handleDeleteRoom()}>Delete Room</button>}
-          <button className="secondary-button" onClick={() => setShowQr(true)}>Show QR</button>
-        </div>
+        {isHost && (
+          <div className="header-actions">
+            <button className="secondary-button" onClick={() => void copyText(room.code, 'Room code copied!')}> <Copy size={15} />Copy Code</button>
+            <button className="secondary-button" onClick={() => void handleShareRoom()}>
+              <Share2 size={15} />Share Room
+            </button>
+            <button className="danger-button" onClick={() => void handleDeleteRoom()}>Delete Room</button>
+            <button className="secondary-button" onClick={() => setShowQr(true)}>Show QR</button>
+          </div>
+        )}
       </div>
 
-      <div className="presence-panel panel">
-        <div className="panel-head">
-          <h3>Listening now</h3>
-          <span className="presence-count">{listeningNow} online</span>
-        </div>
-        <div className="presence-list">
-          {presenceUsers.length ? presenceUsers.map((presenceUser) => (
-            <div key={presenceUser.user_id} className={`presence-item ${presenceUser.user_id === userId ? 'self' : ''}`}>
-              <span className="presence-dot" />
-              <div className="presence-meta">
-                <strong>{presenceUser.display_name}</strong>
-                <small>{presenceUser.is_host || presenceUser.user_id === room.host_id ? 'HOST' : 'LISTENING'}</small>
+      {isHost && (
+        <div className="presence-panel panel">
+          <div className="panel-head">
+            <h3>Listening now</h3>
+            <span className="presence-count">{listeningNow} connected</span>
+          </div>
+          <div className="presence-list">
+            {connectedListeners.length ? connectedListeners.map((presenceUser) => (
+              <div key={presenceUser.user_id} className={`presence-item ${presenceUser.user_id === userId ? 'self' : ''}`}>
+                <span className="presence-dot" />
+                <div className="presence-meta">
+                  <strong>{presenceUser.display_name}</strong>
+                  <small>{presenceUser.user_id === room.host_id ? 'HOST' : 'LISTENING'}</small>
+                </div>
               </div>
-            </div>
-          )) : (
-            <div className="empty-state compact"><p>No listeners connected yet.</p></div>
-          )}
+            )) : (
+              <div className="empty-state compact"><p>No listeners connected yet.</p></div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="room-layout">
         <section className="panel player-panel">
@@ -2402,31 +2416,33 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           {songReady && !uploading && <div className="upload-status success"><Check size={15} />{songReady}</div>}
         </aside>
 
-        <aside className="panel participants-panel">
-          <div className="panel-head">
-            <h3>Connected Devices</h3>
-            <span className="badge subtle">{members.length} people connected</span>
-          </div>
+        {isHost && (
+          <aside className="panel participants-panel">
+            <div className="panel-head">
+              <h3>Connected Devices</h3>
+              <span className="badge subtle">{listeningNow} connected</span>
+            </div>
 
-          <div className="member-list">
-            {members.length === 0 ? (
-              <div className="empty-state compact"><p>Waiting for the first participant.</p></div>
-            ) : (
-              members.map((member) => (
-                <div key={member.user_id} className="member-row">
-                  <div className="avatar tiny">{member.display_name[0]?.toUpperCase() || 'U'}</div>
-                  <div>
-                    <strong>{member.display_name}</strong>
-                    <small>{member.role === 'owner' ? 'HOST' : 'USER'}</small>
+            <div className="member-list">
+              {visibleMembers.length === 0 ? (
+                <div className="empty-state compact"><p>Waiting for the first participant.</p></div>
+              ) : (
+                visibleMembers.map((member) => (
+                  <div key={member.user_id} className="member-row">
+                    <div className="avatar tiny">{member.display_name[0]?.toUpperCase() || 'U'}</div>
+                    <div>
+                      <strong>{member.display_name}</strong>
+                      <small>{member.role === 'owner' ? 'HOST' : 'LISTENING'}</small>
+                    </div>
+                    <span className="online-dot" aria-label="online" />
                   </div>
-                  <span className="online-dot" aria-label="online" />
-                </div>
-              ))
-            )}
-          </div>
-        </aside>
+                ))
+              )}
+            </div>
+          </aside>
+        )}
       </div>
-      {showQr && (
+      {isHost && showQr && (
         <Modal title="Share room" close={() => setShowQr(false)}>
           <div className="qr-modal-content">
             <QRCodeCanvas value={roomUrl} size={220} includeMargin />
