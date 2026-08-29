@@ -1629,6 +1629,27 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           setConnectionStatus('connected');
+          
+          // Fetch latest playback state in case we missed events while disconnected
+          const { data: latestPlayback } = await client
+            .from('playback_state')
+            .select('*')
+            .eq('room_id', roomId)
+            .maybeSingle();
+            
+          if (latestPlayback) {
+            const nextState = latestPlayback as PlaybackState;
+            const nextSequence = Number(nextState.sequence_number ?? -1);
+            const previousSequence = lastProcessedSequenceRef.current ?? -1;
+            
+            if (nextSequence > previousSequence) {
+              lastProcessedSequenceRef.current = nextSequence;
+              latestPlaybackStateRef.current = nextState;
+              applyRemotePlaybackState(nextState);
+              setPlayback(nextState);
+            }
+          }
+
           await channel.track({
             user_id: userId,
             display_name: 'User',
@@ -1926,19 +1947,20 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       sequence_number: nextSequence,
     };
 
-    const { error } = await supabase.from('playback_state').upsert(payload, { onConflict: 'room_id' });
-    if (error) {
-      console.error('Playback sync error', error);
-      notify(`Synchronization failed: ${error.message}`);
-      return;
-    }
+    // 1. Broadcast immediately for instant realtime sync across members
+    void sendRealtimePlaybackCommand(command, payload as PlaybackState);
 
+    // 2. Update local state immediately
     latestPlaybackStateRef.current = payload as PlaybackState;
     lastSequenceNumberRef.current = nextSequence;
     lastProcessedSequenceRef.current = nextSequence;
     setPlayback(payload as PlaybackState);
 
-    await sendRealtimePlaybackCommand(command, payload as PlaybackState);
+    // 3. Persist to DB in the background
+    const { error } = await supabase.from('playback_state').upsert(payload, { onConflict: 'room_id' });
+    if (error) {
+      console.error('Playback sync error (DB)', error);
+    }
   };
 
   const handleHostPause = async () => {
