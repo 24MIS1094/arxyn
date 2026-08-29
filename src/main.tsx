@@ -2360,6 +2360,9 @@ const root = (globalThis as typeof globalThis & { __arxynRoot?: ReturnType<typeo
 (root as ReturnType<typeof createRoot>).render(
   <AppErrorBoundary>
     <App />
+    <div style={{ position: 'fixed', bottom: 10, right: 10, background: 'rgba(0,0,0,0.7)', color: 'white', padding: '4px 8px', borderRadius: 4, fontSize: 10, zIndex: 99999, pointerEvents: 'none' }}>
+      v2.0 - SYNC PAUSE FIX
+    </div>
   </AppErrorBoundary>,
 );
 
