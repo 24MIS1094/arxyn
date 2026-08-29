@@ -66,7 +66,9 @@ const getRoomIdFromLocation = (pathname: string, search: string) => {
 };
 const getRoomUrl = (id: string) => `${window.location.origin}/room/${encodeURIComponent(id)}`;
 const gradient = 'linear-gradient(135deg, rgba(137, 168, 255, 0.24), rgba(255, 128, 102, 0.2) 40%, rgba(122, 89, 255, 0.18));';
-const audioBucket = 'audio';
+const audioBucket = 'room-audio';
+const legacyAudioBucket = 'audio';
+const getAudioBucketCandidates = () => [audioBucket, legacyAudioBucket].filter((bucket, index, buckets) => buckets.indexOf(bucket) === index);
 const allowedAudioMimeTypes = new Set(['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/aac', 'audio/ogg', 'audio/webm']);
 const allowedAudioExtensions = new Set(['mp3', 'wav', 'm4a', 'aac', 'ogg', 'webm']);
 
@@ -99,15 +101,22 @@ const formatTime = (valueMs: number) => {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 };
 
-const getPublicStorageUrl = (path: string) => {
+const getPublicStorageUrl = (path: string, preferredBucket: string = audioBucket) => {
   if (!supabase) return path;
   if (!path || path.startsWith('http://') || path.startsWith('https://') || path.startsWith('blob:')) return path;
-  try {
-    const { data } = supabase.storage.from('audio').getPublicUrl(path);
-    return data?.publicUrl || path;
-  } catch {
-    return path;
+
+  for (const bucketName of [preferredBucket, ...getAudioBucketCandidates().filter((bucket) => bucket !== preferredBucket)]) {
+    try {
+      const { data } = supabase.storage.from(bucketName).getPublicUrl(path);
+      if (data?.publicUrl) {
+        return data.publicUrl;
+      }
+    } catch (error) {
+      console.warn(`Unable to resolve public storage URL from bucket "${bucketName}"`, error);
+    }
   }
+
+  return path;
 };
 
 const getSafeAudioFileName = (fileName: string) => {
@@ -1345,20 +1354,27 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
         const safeFileName = getSafeAudioFileName(file.name);
         const uploadPath = `${roomId}/${crypto.randomUUID()}-${safeFileName}`;
-        console.log('AUDIO UPLOAD DEBUG', {
+        const uploadLog = {
           bucket: audioBucket,
           fileName: file.name,
           fileType: file.type,
           fileSize: file.size,
           roomId,
           uploadPath,
-        });
+        };
+        console.log('AUDIO UPLOAD DEBUG', uploadLog);
         console.log('Uploading audio to bucket:', audioBucket);
-        const { data: uploadedFile, error: uploadError } = await supabase.storage.from('audio').upload(uploadPath, file, { cacheControl: '3600', upsert: false });
+        const { data: uploadedFile, error: uploadError } = await supabase.storage.from(audioBucket).upload(uploadPath, file, { cacheControl: '3600', upsert: false });
 
         if (uploadError) {
           const errorDetails = uploadError as unknown as Record<string, unknown>;
           console.error('AUDIO STORAGE UPLOAD ERROR', {
+            bucket: audioBucket,
+            fileName: file.name,
+            fileType: file.type,
+            fileSize: file.size,
+            roomId,
+            uploadPath,
             name: errorDetails.name,
             message: errorDetails.message,
             status: errorDetails.status,
@@ -1370,7 +1386,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           });
           logSupabaseError(`storage.objects (${audioBucket})`, 'INSERT/upload', uploadError);
           const message = uploadError.message.toLowerCase().includes('bucket not found')
-            ? "Audio storage is not configured. Please create the 'audio' storage bucket in Supabase."
+            ? "Audio storage is not configured. Please create the 'room-audio' storage bucket in Supabase and make it public."
             : uploadError.message;
           notify(message);
           setSongReady(message);
@@ -1378,7 +1394,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
         }
 
         const uploadedPath = uploadedFile?.path || uploadPath;
-        const audioUrl = getPublicStorageUrl(uploadedPath);
+        const audioUrl = getPublicStorageUrl(uploadedPath, audioBucket);
         console.log('AUDIO UPLOAD RESPONSE', uploadedFile);
         console.log('Uploaded audio path:', uploadedPath);
         console.log('AUDIO URL', audioUrl);
@@ -1413,7 +1429,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
         if (insertError) {
           logSupabaseError('queue_items', 'INSERT', insertError);
-          const { error: cleanupError } = await supabase.storage.from('audio').remove([uploadedPath]);
+          const { error: cleanupError } = await supabase.storage.from(audioBucket).remove([uploadedPath]);
           if (cleanupError) {
             logSupabaseError(`storage.objects (${audioBucket})`, 'DELETE orphaned upload', cleanupError);
           }
@@ -1467,9 +1483,14 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
     }
 
     console.log('QUEUE DELETE', { roomId, queueItemId: item.id, mediaId: item.media_id });
-    const { error: storageError } = await supabase.storage.from('audio').remove([item.media_id]);
+    const { error: storageError } = await supabase.storage.from(audioBucket).remove([item.media_id]);
     if (storageError) {
-      logSupabaseError('storage.objects (audio)', 'DELETE queue audio', storageError);
+      console.warn('Queue audio removal from room-audio failed; retrying with legacy bucket.', storageError);
+      const fallbackResult = await supabase.storage.from(legacyAudioBucket).remove([item.media_id]);
+      if (fallbackResult.error) {
+        logSupabaseError(`storage.objects (${audioBucket})`, 'DELETE queue audio', storageError);
+        logSupabaseError(`storage.objects (${legacyAudioBucket})`, 'DELETE queue audio fallback', fallbackResult.error);
+      }
     }
 
     if (!await reorderQueue(remainingItems)) return;
@@ -1510,13 +1531,23 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       notify(`Unable to delete room: ${queueError.message}`);
       return;
     }
-    const { data: audioObjects, error: listError } = await supabase.storage.from('audio').list(roomId);
+    const { data: audioObjects, error: listError } = await supabase.storage.from(audioBucket).list(roomId);
     if (listError) {
-      logSupabaseError('storage.objects (audio)', 'LIST room audio', listError);
+      console.warn('Unable to list room-audio files; checking legacy bucket.', listError);
+      const fallbackResult = await supabase.storage.from(legacyAudioBucket).list(roomId);
+      if (fallbackResult.error) {
+        logSupabaseError(`storage.objects (${audioBucket})`, 'LIST room audio', listError);
+        logSupabaseError(`storage.objects (${legacyAudioBucket})`, 'LIST room audio fallback', fallbackResult.error);
+      } else if (fallbackResult.data?.length) {
+        const { error: storageError } = await supabase.storage.from(legacyAudioBucket).remove(fallbackResult.data.map((object) => `${roomId}/${object.name}`));
+        if (storageError) {
+          logSupabaseError(`storage.objects (${legacyAudioBucket})`, 'DELETE room audio', storageError);
+        }
+      }
     } else if (audioObjects?.length) {
-      const { error: storageError } = await supabase.storage.from('audio').remove(audioObjects.map((object) => `${roomId}/${object.name}`));
+      const { error: storageError } = await supabase.storage.from(audioBucket).remove(audioObjects.map((object) => `${roomId}/${object.name}`));
       if (storageError) {
-        logSupabaseError('storage.objects (audio)', 'DELETE room audio', storageError);
+        logSupabaseError(`storage.objects (${audioBucket})`, 'DELETE room audio', storageError);
       }
     }
     const { error: roomError } = await supabase.from('rooms').delete().eq('id', roomId).eq('host_id', userId);
