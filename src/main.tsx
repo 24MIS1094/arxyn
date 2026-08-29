@@ -76,19 +76,19 @@ const safeSeek = (player: any, seconds: number) => {
   }
 };
 
-const safeGetCurrentTime = (player: any): number => {
-  if (!player) return 0;
+const safeGetCurrentTime = (player: any): number | undefined => {
+  if (!player) return undefined;
   if (typeof player.getCurrentTime === 'function') {
-    return player.getCurrentTime() || 0;
+    return player.getCurrentTime();
   }
   if (player.getInternalPlayer && typeof player.getInternalPlayer === 'function') {
     const internal = player.getInternalPlayer();
     if (internal && typeof internal.getCurrentTime === 'function') {
-      return internal.getCurrentTime() || 0;
+      return internal.getCurrentTime();
     }
   }
   console.warn('ReactPlayer: getCurrentTime method not available', player);
-  return 0;
+  return undefined;
 };
 
 const authConfigError = 'Authentication is not configured for this deployment. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to the Vercel project environment.';
@@ -1290,7 +1290,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     
     const expectedPosition = getExpectedPlaybackPosition(latestPlaybackStateRef.current ?? state, localStateReceiveTimeRef.current || undefined);
     if (Number.isFinite(expectedPosition)) {
-      const currentPos = safeGetCurrentTime(player);
+      const currentPos = safeGetCurrentTime(player) || 0;
       console.log(`[SYNC] EXPECTED POSITION: ${expectedPosition.toFixed(3)}s, ACTUAL POSITION: ${currentPos.toFixed(3)}s`);
       const drift = Math.abs(expectedPosition - currentPos);
       if (drift > 0.5) {
@@ -1357,7 +1357,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       
       const expectedPosition = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
       if (Number.isFinite(expectedPosition)) {
-         const currentPos = safeGetCurrentTime(player);
+         const currentPos = safeGetCurrentTime(player) || 0;
          const drift = expectedPosition - currentPos;
          const absDrift = Math.abs(drift);
          
@@ -1963,7 +1963,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const handleHostPause = async () => {
     if (!supabase || !playerRef.current || !roomId || !isHost) return;
 
-    const positionMs = Math.round(safeGetCurrentTime(playerRef.current) * 1000);
+    const positionMs = Math.round((safeGetCurrentTime(playerRef.current) || 0) * 1000);
     const serverTimestamp = new Date().toISOString();
     
     console.log('HOST PAUSE BUTTON CLICKED');
@@ -1999,7 +1999,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       setAutoplayBlocked(false);
       
       const currentPos = safeGetCurrentTime(playerRef.current);
-      const nextPosition = Number.isFinite(currentPos) ? currentPos : Number(playback?.position_ms || 0) / 1000;
+      const nextPosition = (typeof currentPos === 'number' && Number.isFinite(currentPos)) ? currentPos : Number(playback?.position_ms || 0) / 1000;
 
       const hostTimestamp = new Date().toISOString();
       const sequenceNumber = (latestPlaybackStateRef.current?.sequence_number ?? playback?.sequence_number ?? 0) + 1;
@@ -2249,7 +2249,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 if (state && state.is_playing && playerRef.current) {
                   const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
                   if (Number.isFinite(expected)) {
-                    const drift = Math.abs(expected - safeGetCurrentTime(playerRef.current));
+                    const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
                     if (drift > 0.5) {
                       safeSeek(playerRef.current, expected);
                       lastHardSeekRef.current = Date.now();
