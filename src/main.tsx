@@ -119,6 +119,14 @@ const getPublicStorageUrl = (path: string, preferredBucket: string = audioBucket
   return path;
 };
 
+const getQueueAudioUrl = (item: Pick<QueueItem, 'media_id' | 'source_type'> | null | undefined) => {
+  if (!item?.media_id) return '';
+  const storagePath = item.media_id.trim();
+  if (!storagePath) return '';
+  if (storagePath.startsWith('http://') || storagePath.startsWith('https://') || storagePath.startsWith('blob:')) return storagePath;
+  return getPublicStorageUrl(storagePath, audioBucket);
+};
+
 const getSafeAudioFileName = (fileName: string) => {
   const extension = fileName.includes('.') ? `.${fileName.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'audio'}` : '.audio';
   const baseName = fileName.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'audio';
@@ -1110,7 +1118,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
     }
   };
 
-  const getCurrentAudioUrl = () => currentItem ? getPublicStorageUrl(currentItem.media_id) : '';
+  const getCurrentAudioUrl = () => getQueueAudioUrl(currentItem);
 
   const loadRoomMembers = async (client: NonNullable<typeof supabase>) => {
     try {
@@ -1405,11 +1413,11 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           room_id: roomId,
           media_id: uploadedPath,
           title: file.name.replace(/\.[^/.]+$/, ''),
-          artist: 'Local upload',
+          artist: 'Shared upload',
           artwork_url: null,
           position: nextPosition,
           duration_ms: 0,
-          source_type: 'device_file',
+          source_type: 'shared_upload',
           created_at: new Date().toISOString(),
           requested_by: userId,
         };
@@ -1422,7 +1430,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           artwork_url: item.artwork_url,
           position: nextPosition,
           requested_by: userId,
-          source_type: 'device_file',
+          source_type: 'shared_upload',
           duration_ms: item.duration_ms,
           status: 'queued',
         }).select('id, room_id, media_id, title, artist, artwork_url, position, duration_ms, source_type, created_at, requested_by').single();
@@ -1702,7 +1710,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
     const nextItem = queue[currentIndex + direction];
     if (!nextItem) return;
 
-    const source = getPublicStorageUrl(nextItem.media_id);
+    const source = getQueueAudioUrl(nextItem);
     const audio = audioRef.current;
     if (!audio || !source || source.startsWith('blob:') || source.startsWith('file:')) return;
 
