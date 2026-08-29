@@ -1123,6 +1123,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [showQr, setShowQr] = useState(false);
+  const [showSearchModal, setShowSearchModal] = useState(false);
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
   const [volume, setVolume] = useState(0.8);
@@ -1703,6 +1704,36 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       void syncActiveSource();
     }
   }, [currentItem, isHost]);
+
+  const handleAddSearchResult = async (track: { title: string; artist: string; media_id: string; artwork_url: string | null; duration_ms: number; source_type: string }) => {
+    if (!supabase || !isHost) return;
+    
+    setSongReady(`Adding ${track.title}...`);
+    const nextPosition = queue.length + 1;
+    
+    const { data: insertedItem, error: insertError } = await supabase.from('queue_items').insert({
+      room_id: roomId,
+      media_id: track.media_id,
+      title: track.title,
+      artist: track.artist,
+      artwork_url: track.artwork_url,
+      position: nextPosition,
+      requested_by: userId,
+      source_type: track.source_type,
+      duration_ms: track.duration_ms,
+      status: 'queued',
+    }).select('id, room_id, media_id, title, artist, artwork_url, position, duration_ms, source_type, created_at, requested_by').single();
+
+    if (insertError) {
+      logSupabaseError('queue_items', 'INSERT search result', insertError);
+      notify(insertError.message);
+      setSongReady(insertError.message);
+    } else if (insertedItem) {
+      setQueue((existingQueue) => [...existingQueue, insertedItem as QueueItem].sort((left, right) => left.position - right.position));
+      setSongReady(`${track.title} added`);
+      notify(`Added ${track.title} to queue`);
+    }
+  };
 
   const handleAddSong = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -2387,10 +2418,15 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           <div className="panel-head">
             <h3>Play Queue</h3>
             {isHost && (
-              <label className="upload-button">
-                <Plus size={14} />ADD SONGS
-                <input type="file" accept="audio/*" multiple onChange={handleAddSong} />
-              </label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button className="primary-button" style={{ padding: '6px 12px', fontSize: '12px', height: 'auto', borderRadius: '100px' }} onClick={() => setShowSearchModal(true)}>
+                  <Search size={14} style={{ marginRight: '4px' }} /> Search Music
+                </button>
+                <label className="upload-button">
+                  <Plus size={14} />ADD SONGS
+                  <input type="file" accept="audio/*" multiple onChange={handleAddSong} />
+                </label>
+              </div>
             )}
           </div>
 
@@ -2442,7 +2478,142 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           </button>
         </div>
       )}
+      {isHost && showSearchModal && (
+        <SearchMusicModal
+          close={() => setShowSearchModal(false)}
+          onAddSong={async (track) => {
+            await handleAddSearchResult(track);
+            setShowSearchModal(false);
+          }}
+        />
+      )}
     </>
+  );
+}
+
+function SearchMusicModal({
+  close,
+  onAddSong,
+}: {
+  close: () => void;
+  onAddSong: (item: { title: string; artist: string; media_id: string; artwork_url: string | null; duration_ms: number; source_type: string }) => Promise<void>;
+}) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [hasSearched, setHasSearched] = useState(false);
+  const [addingId, setAddingId] = useState<string | null>(null);
+
+  const search = async (q: string) => {
+    if (!q.trim()) return;
+    setQuery(q);
+    setLoading(true);
+    setError('');
+    setHasSearched(true);
+    
+    try {
+      const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=20`);
+      if (!response.ok) throw new Error('Search failed');
+      const data = await response.json();
+      setResults(data.results || []);
+    } catch (err) {
+      setError('Failed to load search results.');
+      setResults([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAdd = async (track: any) => {
+    setAddingId(track.trackId.toString());
+    try {
+      await onAddSong({
+        title: track.trackName,
+        artist: track.artistName,
+        media_id: track.previewUrl,
+        artwork_url: track.artworkUrl100?.replace('100x100bb', '600x600bb') || null,
+        duration_ms: track.trackTimeMillis || 30000,
+        source_type: 'itunes',
+      });
+    } finally {
+      setAddingId(null);
+    }
+  };
+
+  const suggestions = ['Baahubali songs', 'Telugu Hits', 'Arijit Singh', 'Bollywood Hits', 'Tamil Songs', 'Kesariya', 'Trending Indian songs'];
+
+  return (
+    <div className="search-modal-overlay fade-in" onClick={close}>
+      <div className="search-modal-content" onClick={e => e.stopPropagation()}>
+        <div className="search-modal-header">
+          <h2>Search Music</h2>
+          <button className="icon-button" onClick={close}><X size={20} /></button>
+        </div>
+        
+        <div className="search-bar-wrap">
+          <Search size={18} className="search-icon" />
+          <input
+            autoFocus
+            type="text"
+            placeholder="Search for songs, artists..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void search(query);
+            }}
+          />
+          {query && <button className="icon-button clear-btn" onClick={() => setQuery('')}><X size={16}/></button>}
+        </div>
+
+        <div className="search-modal-body">
+          {!hasSearched && !loading && (
+            <div className="search-suggestions">
+              <h3>🔥 Trending Searches</h3>
+              <div className="suggestion-tags">
+                {suggestions.map(s => (
+                  <button key={s} className="suggestion-tag" onClick={() => void search(s)}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {loading && <div className="search-center-state"><LoaderCircle className="spin" size={32} /></div>}
+
+          {error && <div className="search-center-state form-error">{error}</div>}
+
+          {hasSearched && !loading && !error && results.length === 0 && (
+            <div className="search-center-state">
+              <p>No results found for "{query}"</p>
+            </div>
+          )}
+
+          {hasSearched && !loading && results.length > 0 && (
+            <div className="search-results-list">
+              {results.map(track => (
+                <div key={track.trackId} className="search-result-item">
+                  <img src={track.artworkUrl100} alt={track.trackName} className="search-result-art" />
+                  <div className="search-result-info">
+                    <h4>{track.trackName}</h4>
+                    <p>{track.artistName}</p>
+                  </div>
+                  <button
+                    className="primary-button small"
+                    disabled={addingId === track.trackId.toString()}
+                    onClick={() => void handleAdd(track)}
+                    style={{ padding: '6px 12px', fontSize: '13px', minWidth: '70px' }}
+                  >
+                    {addingId === track.trackId.toString() ? <LoaderCircle className="spin" size={14} /> : <><Plus size={14} style={{marginRight:4}} /> Add</>}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
