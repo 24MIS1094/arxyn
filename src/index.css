@@ -770,6 +770,20 @@ label {
   place-items: center;
   box-shadow: 0 14px 30px rgba(255, 125, 100, 0.16);
 }
+
+.host-locked {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  margin: 22px 0 18px;
+  border: 1px dashed var(--line);
+  border-radius: 18px;
+  color: var(--accent);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  background: rgba(255, 125, 100, 0.05);
+}
 .range-block {
   display: grid;
   gap: 8px;
@@ -1048,7 +1062,7 @@ label {
   .room-header { display: block; }
   .quick-actions,
   .hero-actions,
-  .header-actions { flex-direction: column; }
+  .header-actions { flex-direction: column; margin-top: 18px; }
   .quick-actions button,
   .hero-actions button,
   .header-actions button { width: 100%; }
