@@ -2268,20 +2268,20 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           </div>
 
           <aside className="queue-panel">
-          <div className="panel-head">
-            <h3>Play Queue</h3>
-            {isHost && (
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button className="primary-button" style={{ padding: '6px 12px', fontSize: '12px', height: 'auto', borderRadius: '100px' }} onClick={() => setShowSearchModal(true)}>
-                  <Search size={14} style={{ marginRight: '4px' }} /> Search Music
-                </button>
-                <label className="upload-button">
-                  <Plus size={14} />ADD SONGS
-                  <input type="file" accept="audio/*" multiple onChange={handleAddSong} />
-                </label>
-              </div>
-            )}
-          </div>
+            <div className="queue-header">
+              <h3>Play Queue</h3>
+              {isHost && (
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button type="button" className="primary-button" style={{ padding: '6px 12px', fontSize: '12px', height: 'auto', borderRadius: '100px' }} onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShowSearchModal(true); }}>
+                    <Search size={14} style={{ marginRight: '4px' }} /> Search Music
+                  </button>
+                  <label className="upload-button">
+                    <Plus size={14} />ADD SONGS
+                    <input type="file" accept="audio/*" multiple onChange={handleAddSong} />
+                  </label>
+                </div>
+              )}
+            </div>
 
           <div className="queue-list">
             {queue.length === 0 ? (
@@ -2318,6 +2318,15 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           </div>
         </Modal>
       )}
+      {isHost && showSearchModal && (
+        <SearchMusicModal
+          close={() => setShowSearchModal(false)}
+          onAddSong={async (track) => {
+            await handleAddSearchResult(track);
+            setShowSearchModal(false);
+          }}
+        />
+      )}
     </div>
       {isHidden && (
         <div className="mini-player" onClick={onExpand}>
@@ -2330,15 +2339,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
             {isAudioPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" style={{marginLeft: 2}} />}
           </button>
         </div>
-      )}
-      {isHost && showSearchModal && (
-        <SearchMusicModal
-          close={() => setShowSearchModal(false)}
-          onAddSong={async (track) => {
-            await handleAddSearchResult(track);
-            setShowSearchModal(false);
-          }}
-        />
       )}
     </>
   );
@@ -2372,14 +2372,19 @@ function SearchMusicModal({
       }
 
       const response = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=20&q=${encodeURIComponent(q)}&key=${apiKey}`);
-      if (!response.ok) throw new Error('Search failed');
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error('YOUTUBE API ERROR:', errorData);
+        throw new Error(errorData?.error?.message || 'Search failed');
+      }
       const data = await response.json();
       setResults(data.items || []);
     } catch (err: any) {
       if (err.message === 'YOUTUBE_KEY_MISSING') {
         setError('YouTube API key is missing. Please add VITE_YOUTUBE_API_KEY to your environment variables to enable full-length YouTube playback search.');
       } else {
-        setError('Failed to load search results.');
+        console.error('SEARCH ERROR:', err);
+        setError(err.message || 'Failed to load search results.');
       }
       setResults([]);
     } finally {
