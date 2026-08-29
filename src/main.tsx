@@ -134,12 +134,21 @@ const getQueueAudioUrl = (item: Pick<QueueItem, 'media_id' | 'source_type'> | nu
   return getPublicStorageUrl(storagePath, audioBucket);
 };
 
-const getExpectedPlaybackPosition = (state: PlaybackState | null) => {
+const getExpectedPlaybackPosition = (state: PlaybackState | null, localReceiveTime?: number) => {
   if (!state) return 0;
   const positionMs = Number(state.position_ms ?? 0);
+  
+  if (!state.is_playing) return positionMs / 1000;
+
+  if (localReceiveTime) {
+    const elapsedSeconds = (Date.now() - localReceiveTime) / 1000;
+    return Math.max(0, positionMs / 1000 + elapsedSeconds);
+  }
+
   const timestampMs = Date.parse(state.server_timestamp ?? new Date().toISOString());
   if (!Number.isFinite(timestampMs)) return positionMs / 1000;
-  const elapsedSeconds = state.is_playing ? (Date.now() - timestampMs) / 1000 : 0;
+  
+  const elapsedSeconds = (Date.now() - timestampMs) / 1000;
   return Math.max(0, positionMs / 1000 + elapsedSeconds);
 };
 
@@ -1118,13 +1127,18 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
   const [volume, setVolume] = useState(0.8);
   const [profileName, setProfileName] = useState('You');
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const lastSyncRef = useRef(0);
+  const currentItemRef = useRef<QueueItem | null>(null);
+  const isTransitioningRef = useRef(false);
+  const localStateReceiveTimeRef = useRef<number>(0);
+  const lastHardSeekRef = useRef<number>(0);
+  const wasBufferingRef = useRef<boolean>(false);
   const scheduledPlayTimeoutRef = useRef<number | null>(null);
   const latestPlaybackStateRef = useRef<PlaybackState | null>(null);
   const lastSequenceNumberRef = useRef<number | null>(null);
   const lastProcessedSequenceRef = useRef<number | null>(null);
   const roomChannelRef = useRef<any>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lastSyncRef = useRef(0);
 
   const isHost = room?.host_id === userId;
   const currentItem = queue.find((item) => playback && item.media_id === playback.media_id) ?? queue[0] ?? null;
@@ -1247,6 +1261,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     const applyPlay = async () => {
       try {
         if (audio.readyState < 1) { // HAVE_METADATA
+          wasBufferingRef.current = true;
           await new Promise<void>((resolve, reject) => {
             const onMetadata = () => { cleanup(); resolve(); };
             const onError = () => { cleanup(); reject(new Error('Audio load failed')); };
@@ -1259,13 +1274,15 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           });
         }
 
-        const expectedPosition = getExpectedPlaybackPosition(latestPlaybackStateRef.current ?? state);
+        const expectedPosition = getExpectedPlaybackPosition(latestPlaybackStateRef.current ?? state, localStateReceiveTimeRef.current || undefined);
         if (Number.isFinite(expectedPosition)) {
           console.log(`[SYNC] EXPECTED POSITION: ${expectedPosition.toFixed(3)}s, ACTUAL POSITION: ${audio.currentTime.toFixed(3)}s`);
           const drift = Math.abs(expectedPosition - audio.currentTime);
-          if (drift > 0.25) {
+          if (drift > 0.5) {
+            console.log(`[SYNC] HARD SEEK position=${expectedPosition.toFixed(3)}`);
             audio.currentTime = expectedPosition;
             setCurrentTime(expectedPosition);
+            lastHardSeekRef.current = Date.now();
           }
         }
         
@@ -1273,6 +1290,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           await audio.play();
           console.log('[SYNC] AUDIO PLAYING');
           setAutoplayBlocked(false);
+          wasBufferingRef.current = false;
         }
       } catch (error) {
         console.error('[SYNC] AUDIO PLAY FAILED', error);
@@ -1398,27 +1416,33 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       const audio = audioRef.current;
       if (!audio || audio.paused || audio.readyState < 1) return; // Wait for applyAuthoritativePlaybackState to play it first
       
-      const expectedPosition = getExpectedPlaybackPosition(state);
+      const expectedPosition = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
       if (Number.isFinite(expectedPosition)) {
          const drift = expectedPosition - audio.currentTime;
          const absDrift = Math.abs(drift);
          
-         if (absDrift < 0.25) {
+         if (absDrift < 0.5) {
            // Small drift, do nothing, reset rate if modified
            if (audio.playbackRate !== 1) audio.playbackRate = 1;
-         } else if (absDrift >= 0.25 && absDrift <= 1.0) {
+         } else if (absDrift >= 0.5 && absDrift <= 1.5) {
            // Medium drift, gently adjust playback rate
-           const targetRate = drift > 0 ? 1.05 : 0.95;
+           const targetRate = drift > 0 ? 1.02 : 0.98;
            if (Math.abs(audio.playbackRate - targetRate) > 0.01) {
              console.log(`[SYNC] RATE CORRECTION drift=${drift.toFixed(3)}s, rate=${targetRate}`);
              audio.playbackRate = targetRate;
            }
          } else {
            // Large drift, hard seek
-           console.log(`[SYNC] HARD CORRECTION drift=${drift.toFixed(3)}s`);
-           audio.currentTime = expectedPosition;
-           setCurrentTime(expectedPosition);
-           if (audio.playbackRate !== 1) audio.playbackRate = 1;
+           const now = Date.now();
+           if (now - lastHardSeekRef.current > 4000) {
+             console.log(`[SYNC] HARD CORRECTION drift=${drift.toFixed(3)}s`);
+             audio.currentTime = expectedPosition;
+             setCurrentTime(expectedPosition);
+             lastHardSeekRef.current = now;
+             if (audio.playbackRate !== 1) audio.playbackRate = 1;
+           } else {
+             console.log(`[SYNC] HARD SEEK BLOCKED BY COOLDOWN drift=${drift.toFixed(3)}s`);
+           }
          }
       }
     }, 1000);
@@ -1560,6 +1584,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
         lastProcessedSequenceRef.current = nextSequence;
         latestPlaybackStateRef.current = nextState;
+        localStateReceiveTimeRef.current = Date.now();
         console.log(`[SYNC] MEMBER RECEIVED state sequence=${nextSequence} playing=${nextState.is_playing}`);
         applyAuthoritativePlaybackState(nextState);
         if (!isHost) setPlayback(nextState);
@@ -1589,6 +1614,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
         lastProcessedSequenceRef.current = nextSequence;
         latestPlaybackStateRef.current = nextState;
+        localStateReceiveTimeRef.current = Date.now();
         console.log(`[SYNC] MEMBER RECEIVED state sequence=${nextSequence} playing=${nextState.is_playing}`);
         applyAuthoritativePlaybackState(nextState);
         if (!isHost) setPlayback(nextState);
@@ -1606,6 +1632,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
         lastProcessedSequenceRef.current = nextSequence;
         latestPlaybackStateRef.current = nextState;
+        localStateReceiveTimeRef.current = Date.now();
         console.log(`[SYNC] MEMBER RECEIVED state sequence=${nextSequence} playing=${nextState.is_playing}`);
         applyAuthoritativePlaybackState(nextState);
         if (!isHost) setPlayback(nextState);
@@ -2288,25 +2315,29 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
               console.log('AUDIO PLAY', audioRef.current?.src);
             }}
             onPlaying={() => {
-              if (!isHost) {
+              if (!isHost && wasBufferingRef.current) {
                 const state = latestPlaybackStateRef.current;
                 if (state && state.is_playing && audioRef.current) {
-                  const expected = getExpectedPlaybackPosition(state);
+                  const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
                   if (Number.isFinite(expected)) {
                     const drift = Math.abs(expected - audioRef.current.currentTime);
                     if (drift > 0.5) {
                       console.log(`[SYNC] RECOVERED FROM BUFFERING, drift=${drift.toFixed(3)}s`);
                       audioRef.current.currentTime = expected;
+                      console.log('[SYNC] JUMPED TO LIVE HOST POSITION');
+                      lastHardSeekRef.current = Date.now();
                     }
                   }
                 }
+                wasBufferingRef.current = false;
               }
+              console.log('[SYNC] NORMAL PLAYING EVENT');
             }}
             onPause={() => {
               setIsAudioPlaying(false);
               console.log('AUDIO PAUSE', audioRef.current?.src);
             }}
-            onWaiting={() => console.log('AUDIO WAITING', audioRef.current?.src)}
+            onWaiting={() => console.log('[SYNC] BUFFERING', audioRef.current?.src)}
             onCanPlayThrough={() => console.log('AUDIO CAN PLAY THROUGH', audioRef.current?.src)}
             onError={(event) => {
               const audio = event.currentTarget;
