@@ -6,7 +6,7 @@ import { supabase } from './lib/supabase';
 import type { Session } from '@supabase/supabase-js';
 import './index.css';
 
-type View = 'home' | 'rooms' | 'profile' | 'settings' | 'room';
+type View = 'home' | 'rooms' | 'profile' | 'settings' | 'room' | 'browse' | 'search' | 'library' | 'playlists' | 'downloads' | 'connected';
 
 type Room = {
   id: string;
@@ -547,35 +547,45 @@ function Shell({
   return (
     <div className={dark ? 'app' : 'app light'}>
       <aside className="sidebar">
-        <div className="brand" aria-label="ARXYN brand">
+        <div className="brand" aria-label="SYNCWAVE brand">
           <span className="brand-mark"><Radio size={17} /></span>
-          <span>AR<span className="logo-x">X</span>YN</span>
-        </div>
-
-        <div className="profile-chip">
-          <div className="avatar avatar-ra">{name[0]?.toUpperCase() || 'A'}</div>
-          <div>
-            <strong>{name}</strong>
-            <small>{session.user.email}</small>
-          </div>
+          <span>SYNCWAVE</span>
         </div>
 
         <nav className="nav-main" aria-label="Main navigation">
           <button className={view === 'home' ? 'nav-item active' : 'nav-item'} onClick={() => setView('home')}>
             <HomeIcon size={18} />Home
           </button>
-          <button className={view === 'rooms' ? 'nav-item active' : 'nav-item'} onClick={() => setView('rooms')}>
-            <Music2 size={18} />Rooms
+          <button className={view === 'browse' ? 'nav-item active' : 'nav-item'} onClick={() => setView('browse')}>
+            <Music2 size={18} />Browse
           </button>
-          <button className={view === 'profile' ? 'nav-item active' : 'nav-item'} onClick={() => setView('profile')}>
-            <Users size={18} />Profile
+          <button className={view === 'search' ? 'nav-item active' : 'nav-item'} onClick={() => setView('search')}>
+            <Search size={18} />Search
           </button>
-          <button className={view === 'settings' ? 'nav-item active' : 'nav-item'} onClick={() => setView('settings')}>
-            <Settings size={18} />Settings
+
+          <div className="nav-section-title">Your Library</div>
+          <button className={view === 'library' ? 'nav-item active' : 'nav-item'} onClick={() => setView('library')}>
+            <HomeIcon size={18} />Library
+          </button>
+          <button className={view === 'playlists' ? 'nav-item active' : 'nav-item'} onClick={() => setView('playlists')}>
+            <Music2 size={18} />Playlists
+          </button>
+
+          <div className="nav-section-title">Syncwave</div>
+          <button className={view === 'rooms' || view === 'room' ? 'nav-item active' : 'nav-item'} onClick={() => setView('rooms')}>
+            <Users size={18} />Listening Together
           </button>
         </nav>
 
         <div className="sidebar-bottom">
+          <div className="profile-chip">
+            <div className="avatar avatar-ra">{name[0]?.toUpperCase() || 'A'}</div>
+            <div>
+              <strong>{name}</strong>
+              <small>{session.user.email}</small>
+            </div>
+          </div>
+          
           <button className="nav-item" onClick={() => setDark(!dark)}>
             <Menu size={18} />{dark ? 'Light theme' : 'Dark theme'}
           </button>
@@ -587,10 +597,12 @@ function Shell({
 
       <main className="main-panel">
         <header className="topbar">
-          <div className="mobile-brand">ARXYN</div>
+          <div className="mobile-brand">
+            <span className="brand-mark" style={{width:24,height:24}}><Radio size={14} /></span> SYNCWAVE
+          </div>
           <div className="top-actions">
-            <button className="icon-button" onClick={() => setDark(!dark)} aria-label="Toggle theme">�</button>
-            <div className="avatar avatar-ra">{name[0]?.toUpperCase() || 'A'}</div>
+            <button className="icon-button small" onClick={() => setDark(!dark)} aria-label="Toggle theme">✨</button>
+            <div className="avatar tiny avatar-ra">{name[0]?.toUpperCase() || 'A'}</div>
           </div>
         </header>
 
@@ -598,8 +610,26 @@ function Shell({
         {view === 'rooms' && <Rooms userId={session.user.id} setModal={setModal} openRoom={openRoom} />}
         {view === 'profile' && <Profile user={session.user} logout={logout} notify={notify} />}
         {view === 'settings' && <SettingsView dark={dark} setDark={setDark} logout={logout} />}
-        {view === 'room' && roomId && <Room roomId={roomId} userId={session.user.id} notify={notify} onRoomDeleted={onRoomDeleted} />}
+        {roomId && <Room roomId={roomId} userId={session.user.id} notify={notify} onRoomDeleted={onRoomDeleted} isHidden={view !== 'room'} onExpand={() => setView('room')} />}
+        {['browse', 'search', 'library', 'playlists', 'downloads', 'connected'].includes(view) && (
+          <div className="content"><div className="empty-state"><Music2 size={24} /><h3>Coming Soon</h3><p>This premium feature is under construction.</p></div></div>
+        )}
       </main>
+
+      <nav className="mobile-nav">
+        <button className={`mobile-nav-item ${view === 'home' ? 'active' : ''}`} onClick={() => setView('home')}>
+          <HomeIcon size={20} />Home
+        </button>
+        <button className={`mobile-nav-item ${view === 'search' ? 'active' : ''}`} onClick={() => setView('search')}>
+          <Search size={20} />Search
+        </button>
+        <button className={`mobile-nav-item ${view === 'library' ? 'active' : ''}`} onClick={() => setView('library')}>
+          <Music2 size={20} />Library
+        </button>
+        <button className={`mobile-nav-item ${view === 'rooms' || view === 'room' ? 'active' : ''}`} onClick={() => setView('rooms')}>
+          <Radio size={20} />Sync
+        </button>
+      </nav>
 
       {modal === 'create' && <CreateRoom userId={session.user.id} close={() => setModal(null)} openRoom={openRoom} notify={notify} />}
       {modal === 'join' && <JoinRoom close={() => setModal(null)} openRoom={openRoom} notify={notify} />}
@@ -635,107 +665,88 @@ function Home({ setModal, openRoom, userId }: { setModal: (modal: 'create' | 'jo
     void loadRooms();
   }, [userId]);
 
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good Morning' : hour < 18 ? 'Good Afternoon' : 'Good Evening';
+
+  // Dummy data for premium look
+  const recentTracks = [
+    { title: 'Starboy', artist: 'The Weeknd', art: 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=300&q=80' },
+    { title: 'Midnight City', artist: 'M83', art: 'https://images.unsplash.com/photo-1619983081563-430f63602796?w=300&q=80' },
+    { title: 'Levitating', artist: 'Dua Lipa', art: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&q=80' },
+    { title: 'Blinding Lights', artist: 'The Weeknd', art: 'https://images.unsplash.com/photo-1493225457124-a1a2a5956092?w=300&q=80' },
+    { title: 'As It Was', artist: 'Harry Styles', art: 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&q=80' },
+  ];
+
   return (
     <div className="content fade-in">
-      <div className="greeting-row">
-        <div>
-          <p className="eyebrow">LISTEN TOGETHER</p>
-          <h1>Listen Together.</h1>
-          <p className="muted">Create a room, invite your friends, and experience music in sync.</p>
-        </div>
+      <h1 className="greeting">{greeting}</h1>
 
-        <div className="quick-actions">
-          <button className="primary-button" onClick={() => setModal('create')}>
-            <Plus size={18} />CREATE ROOM
-          </button>
-          <button className="secondary-button" onClick={() => setModal('join')}>
-            <Search size={17} />JOIN ROOM
-          </button>
+      <div className="featured-hero">
+        <div className="featured-content">
+          <div>
+            <p className="eyebrow">NEW RELEASE</p>
+            <h3>Dawn FM</h3>
+            <p>The Weeknd</p>
+          </div>
+          <button className="featured-play"><Play fill="currentColor" size={24} style={{marginLeft: 4}} /></button>
         </div>
       </div>
 
-      <section className="home-grid">
-        <div className="hero-panel">
-          <div className="hero-topline">ARXYN / LIVE ROOMS</div>
-          <h2>Premium listening rooms for your people.</h2>
-          <p>Host the room, add your local songs, and keep everyone aligned on the same timeline.</p>
-          <div className="hero-actions">
-            <button className="primary-button" onClick={() => setModal('create')}>Create Your Room</button>
-            <button className="secondary-button" onClick={() => setModal('join')}>Join with Code</button>
-          </div>
-        </div>
-
-        <div className="mini-panel">
-          <p className="eyebrow">ROOM STATUS</p>
-          <div className="mini-stat">
-            <strong>{loading ? '...' : rooms.length}</strong>
-            <span>rooms</span>
-          </div>
-          <div className="mini-stat">
-            <strong>{rooms.length > 0 ? 'Live' : 'Ready'}</strong>
-            <span>sync state</span>
-          </div>
-        </div>
-      </section>
-
-      <section className="room-collections">
-        <div className="surface-section">
-          <div className="section-head">
-            <h3>Recent Rooms</h3>
-            <button className="text-link" onClick={() => setModal('join')}>Join room</button>
-          </div>
-
-          {loading ? (
-            <div className="empty-state"><LoaderCircle className="spin" size={22} />Loading rooms</div>
-          ) : rooms.length === 0 ? (
-            <div className="empty-state">
-              <Radio size={26} />
-              <h4>No rooms yet</h4>
-              <p>Start with your first shared listening room.</p>
-              <button className="primary-button" onClick={() => setModal('create')}>Create Your First Room</button>
+      <h2 className="section-title">Recently Played <span className="more">See All</span></h2>
+      <div className="horizontal-scroll">
+        {recentTracks.map((track, i) => (
+          <div key={i} className="music-card">
+            <div className="music-art" style={{ background: `url(${track.art}) center/cover` }}>
+              <div className="music-play-overlay"><div className="play-btn"><Play fill="currentColor" size={20} style={{marginLeft: 3}} /></div></div>
             </div>
-          ) : (
-            <div className="mini-card-grid">
-              {rooms.slice(0, 3).map((room) => (
-                <button key={room.id} className="mini-room-card" onClick={() => openRoom(room.id)}>
-                  <div className="card-art" style={{ background: gradient }} />
-                  <div>
-                    <h4>{room.name}</h4>
-                    <small>{room.code}</small>
-                  </div>
-                </button>
-              ))}
+            <div className="music-card-info">
+              <h4>{track.title}</h4>
+              <p>{track.artist}</p>
             </div>
-          )}
-        </div>
-
-        <div className="surface-section">
-          <div className="section-head">
-            <h3>My Rooms</h3>
-            <button className="text-link" onClick={() => setModal('create')}>New room</button>
           </div>
+        ))}
+      </div>
 
-          {loading ? (
-            <div className="empty-state"><LoaderCircle className="spin" size={22} />Loading rooms</div>
-          ) : rooms.length === 0 ? (
-            <div className="empty-state compact">
-              <p>No rooms yet</p>
-            </div>
-          ) : (
-            <div className="list-stack">
-              {rooms.map((room) => (
-                <button key={room.id} className="room-row" onClick={() => openRoom(room.id)}>
-                  <div className="room-row-meta">
-                    <strong>{room.name}</strong>
-                    <span>{room.code} � {room.max_participants} max</span>
-                  </div>
-                  <span className="badge">{room.visibility}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </section>
+      <h2 className="section-title">Listening Sessions <span className="more">View All</span></h2>
+      
+      <div className="quick-actions" style={{marginBottom: 24}}>
+        <button className="primary-button" onClick={() => setModal('create')}>
+          <Plus size={18} /> Create a Listening Session
+        </button>
+        <button className="secondary-button" onClick={() => setModal('join')}>
+          <Search size={17} /> Join Session
+        </button>
+      </div>
+
+      <div className="session-grid">
+        {loading ? (
+          <div className="empty-state"><LoaderCircle className="spin" size={22} /> Loading sessions</div>
+        ) : rooms.length === 0 ? (
+          <div className="empty-state" style={{gridColumn: '1/-1'}}>
+            <Radio size={26} />
+            <h4>No active sessions</h4>
+            <p>Create a session to listen to music with your friends.</p>
+          </div>
+        ) : (
+          rooms.map((room) => (
+            <button key={room.id} className="session-card" onClick={() => openRoom(room.id)}>
+              <div className="wave-bg" />
+              <div className="session-header">
+                <span className="live-pill"><i /> LIVE</span>
+                <Users size={16} color="var(--text-secondary)" />
+              </div>
+              <div className="session-info">
+                <h3>{room.name}</h3>
+                <div className="session-meta">
+                  <span style={{color: 'var(--accent-primary)'}}>{room.code}</span>
+                  <span>•</span>
+                  <span>{room.max_participants} max listeners</span>
+                </div>
+              </div>
+            </button>
+          ))
+        )}
+      </div>
     </div>
   );
 }
@@ -884,7 +895,7 @@ function CreateRoom({ userId, close, openRoom, notify }: { userId: string; close
   };
 
   return (
-    <Modal title="Create room" close={close}>
+    <Modal title="Create a Listening Session" close={close}>
       <div className="form-grid">
         <label>
           Room Name
@@ -981,7 +992,7 @@ function JoinRoom({ close, openRoom, notify }: { close: () => void; openRoom: (i
   };
 
   return (
-    <Modal title="Join room" close={close}>
+    <Modal title="Join Session" close={close}>
       <div className="join-room-wrap">
         <div className="join-methods">
           <button className="join-tab active" type="button">Enter Room Code</button>
@@ -1090,7 +1101,7 @@ function SettingsView({ dark, setDark, logout }: { dark: boolean; setDark: (dark
   );
 }
 
-function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userId: string; notify: (text: string) => void; onRoomDeleted: () => void }) {
+function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { roomId: string; userId: string; notify: (text: string) => void; onRoomDeleted: () => void; isHidden?: boolean; onExpand?: () => void }) {
   const [room, setRoom] = useState<Room | null>(null);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [playback, setPlayback] = useState<PlaybackState | null>(null);
@@ -2176,10 +2187,11 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
   const listeningNow = connectedListeners.length;
 
   return (
-    <div className="room-content fade-in">
+    <>
+      <div className="room-content fade-in" style={{ display: isHidden ? 'none' : 'block' }}>
       <div className="room-header">
         <div>
-          <div className="breadcrumb"><span>ARXYN /</span> <span>{getDisplayRoomName(room)}</span></div>
+          <div className="breadcrumb"><span>SYNCWAVE /</span> <span>{getDisplayRoomName(room)}</span></div>
           <h1>{room.name}</h1>
           <div className="room-meta">
             <span className={`room-state ${connectionStatus === 'connected' ? 'online' : connectionStatus === 'reconnecting' ? 'reconnecting' : 'offline'}`}><i />{connectionStatus === 'connected' ? 'Connected' : connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Disconnected'}</span>
@@ -2195,59 +2207,39 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
             <button className="secondary-button" onClick={() => void handleShareRoom()}>
               <Share2 size={15} />Share Room
             </button>
-            <button className="danger-button" onClick={() => void handleDeleteRoom()}>Delete Room</button>
             <button className="secondary-button" onClick={() => setShowQr(true)}>Show QR</button>
+            <button className="danger-button" onClick={() => void handleDeleteRoom()}>Delete Room</button>
           </div>
         )}
       </div>
 
-      {isHost && (
-        <div className="presence-panel panel">
-          <div className="panel-head">
-            <h3>Listening now</h3>
-            <span className="presence-count">{listeningNow} connected</span>
-          </div>
-          <div className="presence-list">
-            {connectedListeners.length ? connectedListeners.map((presenceUser) => (
-              <div key={presenceUser.user_id} className={`presence-item ${presenceUser.user_id === userId ? 'self' : ''}`}>
-                <span className="presence-dot" />
-                <div className="presence-meta">
-                  <strong>{presenceUser.display_name}</strong>
-                  <small>{presenceUser.user_id === room.host_id ? 'HOST' : 'LISTENING'}</small>
-                </div>
-              </div>
-            )) : (
-              <div className="empty-state compact"><p>No listeners connected yet.</p></div>
-            )}
-          </div>
-        </div>
-      )}
-
       <div className="room-layout">
-        <section className="panel player-panel">
-          <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}>
+        <section className="player-panel">
+          <div className="player-art-wrap">
+            <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
             <div className="art-overlay">
+              <span className="live-pill"><i /> LIVE</span>
               <span>{room.visibility}</span>
-              <span className="art-more">LIVE</span>
             </div>
           </div>
 
-          <div className="track-info">
+          <div className="track-info-large">
             <div>
-              <p className="eyebrow">NOW PLAYING</p>
               <h2>{currentItem?.title || 'No song selected'}</h2>
-              <p className="muted">{currentItem?.artist || 'Awaiting the host to add tracks'} · <span>{room.name}</span></p>
+              <p>{currentItem?.artist || 'Awaiting host'}</p>
             </div>
-            <button className="like-button" aria-label="Like song">?</button>
+            <button className="like-button" aria-label="Like song">♡</button>
           </div>
 
           <div className="status-row">
-            <span className={`status-pill ${playback?.is_playing ? 'playing' : 'paused'}`}>{playback?.is_playing ? '🟢 Playing' : '⏸ Paused'}</span>
-            <span className="status-pill muted-pill">{isHost ? 'Host control' : 'Synchronized with Host'}</span>
+            <span className={`status-pill ${playback?.is_playing ? 'playing' : ''}`}>{playback?.is_playing ? '🟢 Playing' : '⏸ Paused'}</span>
+            <span className="status-pill">{isHost ? 'Host control' : 'Synchronized with Host'}</span>
           </div>
 
           <div className="progress-wrap">
-            <div className="progress-bar"><span style={{ width: `${Math.min(Math.max(progress, 0), 100)}%` }} /></div>
+            <div className="progress-bar-bg">
+              <div className="progress-bar-fill" style={{ width: `${Math.min(Math.max(progress, 0), 100)}%` }} />
+            </div>
             <div className="progress-times">
               <span>{formatTime(currentTime * 1000)}</span>
               <span>{formatTime(durationMs || 0)}</span>
@@ -2257,11 +2249,11 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           {isHost ? (
             <>
               <div className="player-controls">
-                <button className="icon-button small" aria-label="Previous song" onClick={() => void handleAdjacentTrack(-1)} disabled={queue.length < 2}><SkipBack size={18} /></button>
+                <button className="icon-button" aria-label="Previous song" onClick={() => void handleAdjacentTrack(-1)} disabled={queue.length < 2}><SkipBack size={24} fill="currentColor" /></button>
                 <button className="play-button" aria-label={isAudioPlaying ? 'Pause' : 'Play'} onClick={() => void handlePlayPause()} disabled={!currentItem}>
-                  {isAudioPlaying ? <Pause size={18} /> : <Play size={18} />}
+                  {isAudioPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" style={{marginLeft:4}} />}
                 </button>
-                <button className="icon-button small" aria-label="Next song" onClick={() => void handleAdjacentTrack(1)} disabled={queue.length < 2}><SkipForward size={18} /></button>
+                <button className="icon-button" aria-label="Next song" onClick={() => void handleAdjacentTrack(1)} disabled={queue.length < 2}><SkipForward size={24} fill="currentColor" /></button>
               </div>
               <div className="range-block">
                 <div className="range-header">
@@ -2280,7 +2272,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
               </div>
             </>
           ) : (
-            <div className="host-locked">Controlled by Host</div>
+            <div className="host-locked-pill"><Users size={16} /> Controlled by Host</div>
           )}
 
           <div className="volume-block">
@@ -2336,7 +2328,34 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           />
         </section>
 
-        <aside className="panel queue-panel">
+        <div>
+          <div className="sync-panel" style={{marginBottom: 32}}>
+            <div className="sync-wave-bg" />
+            <div className="sync-panel-head">
+              <h3>Listening Together</h3>
+              <div className="sync-status">
+                <i className="device-sync-indicator">●</i> {listeningNow} Devices Synced
+              </div>
+            </div>
+            <div className="device-list">
+              {visibleMembers.length === 0 ? (
+                <div className="empty-state compact"><p>Waiting for listeners...</p></div>
+              ) : (
+                visibleMembers.map((member) => (
+                  <div key={member.user_id} className="device-row">
+                    <div className="device-avatar">{member.display_name[0]?.toUpperCase() || 'U'}</div>
+                    <div className="device-info">
+                      <strong>{member.display_name} {member.user_id === userId ? '(You)' : ''}</strong>
+                      <small>{member.role === 'owner' ? 'Host Device' : 'Connected Device'}</small>
+                    </div>
+                    {playback?.is_playing && <div className="device-sync-indicator"><Radio size={16} /></div>}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <aside className="queue-panel">
           <div className="panel-head">
             <h3>Play Queue</h3>
             {isHost && (
@@ -2370,32 +2389,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           {uploading && <div className="upload-status"><LoaderCircle className="spin" size={15} />{songReady || 'Uploading Song...'}</div>}
           {songReady && !uploading && <div className="upload-status success"><Check size={15} />{songReady}</div>}
         </aside>
-
-        {isHost && (
-          <aside className="panel participants-panel">
-            <div className="panel-head">
-              <h3>Connected Devices</h3>
-              <span className="badge subtle">{listeningNow} connected</span>
-            </div>
-
-            <div className="member-list">
-              {visibleMembers.length === 0 ? (
-                <div className="empty-state compact"><p>Waiting for the first participant.</p></div>
-              ) : (
-                visibleMembers.map((member) => (
-                  <div key={member.user_id} className="member-row">
-                    <div className="avatar tiny">{member.display_name[0]?.toUpperCase() || 'U'}</div>
-                    <div>
-                      <strong>{member.display_name}</strong>
-                      <small>{member.role === 'owner' ? 'HOST' : 'LISTENING'}</small>
-                    </div>
-                    <span className="online-dot" aria-label="online" />
-                  </div>
-                ))
-              )}
-            </div>
-          </aside>
-        )}
+        </div>
       </div>
       {isHost && showQr && (
         <Modal title="Share room" close={() => setShowQr(false)}>
@@ -2408,6 +2402,19 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
         </Modal>
       )}
     </div>
+      {isHidden && (
+        <div className="mini-player" onClick={onExpand}>
+          <div className="mini-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }} />
+          <div className="mini-info">
+            <h4>{currentItem?.title || 'No song selected'}</h4>
+            <p>{currentItem?.artist || 'SYNCWAVE'}</p>
+          </div>
+          <button className="mini-play" aria-label={isAudioPlaying ? 'Pause' : 'Play'} onClick={(e) => { e.stopPropagation(); void handlePlayPause(); }} disabled={!currentItem || (!isHost && !currentItem)}>
+            {isAudioPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" style={{marginLeft: 2}} />}
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 
