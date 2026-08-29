@@ -1,9 +1,10 @@
-import { type ChangeEvent, type FormEvent, Component, type ErrorInfo, type ReactNode, useEffect, useRef, useState } from 'react';
+import React, { type ChangeEvent, type FormEvent, Component, type ErrorInfo, type ReactNode, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AlertCircle, ArrowUpRight, Check, Copy, Home as HomeIcon, LoaderCircle, LogOut, Menu, Music2, Pause, Play, Plus, Radio, Search, Settings, Share2, SkipBack, SkipForward, Users, X } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from './lib/supabase';
 import type { Session } from '@supabase/supabase-js';
+import ReactPlayer from 'react-player';
 import './index.css';
 
 type View = 'home' | 'rooms' | 'profile' | 'settings' | 'room' | 'browse' | 'search' | 'library' | 'playlists' | 'downloads' | 'connected';
@@ -1138,7 +1139,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const lastSequenceNumberRef = useRef<number | null>(null);
   const lastProcessedSequenceRef = useRef<number | null>(null);
   const roomChannelRef = useRef<any>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playerRef = useRef<any>(null);
   const lastSyncRef = useRef(0);
 
   const isHost = room?.host_id === userId;
@@ -1240,66 +1241,41 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
   const applyAuthoritativePlaybackState = (state: PlaybackState) => {
     latestPlaybackStateRef.current = state;
-    const audio = audioRef.current;
+    const player = playerRef.current;
     
     // We only control playback for members, not the host.
-    if (!audio || isHost) return;
+    if (!player || isHost) return;
 
     if (state.is_playing === false) {
       console.log(`[SYNC] MEMBER PAUSED sequence=${state.sequence_number}`);
       clearScheduledPlay();
-      audio.pause();
-      audio.playbackRate = 1;
-      audio.currentTime = Number(state.position_ms ?? 0) / 1000;
-      setCurrentTime(audio.currentTime);
       setIsAudioPlaying(false);
-      return; // TERMINAL PAUSE BRANCH. NEVER CALL PLAY() AFTER THIS.
+      const position = Number(state.position_ms ?? 0) / 1000;
+      player.seekTo(position, 'seconds');
+      setCurrentTime(position);
+      return;
     }
 
     // PLAYING BRANCH
     console.log(`[SYNC] MEMBER RECEIVED PLAY sequence=${state.sequence_number}`);
     
-    const applyPlay = async () => {
-      try {
-        if (audio.readyState < 1) { // HAVE_METADATA
-          wasBufferingRef.current = true;
-          await new Promise<void>((resolve, reject) => {
-            const onMetadata = () => { cleanup(); resolve(); };
-            const onError = () => { cleanup(); reject(new Error('Audio load failed')); };
-            const cleanup = () => {
-              audio.removeEventListener('loadedmetadata', onMetadata);
-              audio.removeEventListener('error', onError);
-            };
-            audio.addEventListener('loadedmetadata', onMetadata);
-            audio.addEventListener('error', onError);
-          });
-        }
-
-        const expectedPosition = getExpectedPlaybackPosition(latestPlaybackStateRef.current ?? state, localStateReceiveTimeRef.current || undefined);
-        if (Number.isFinite(expectedPosition)) {
-          console.log(`[SYNC] EXPECTED POSITION: ${expectedPosition.toFixed(3)}s, ACTUAL POSITION: ${audio.currentTime.toFixed(3)}s`);
-          const drift = Math.abs(expectedPosition - audio.currentTime);
-          if (drift > 0.5) {
-            console.log(`[SYNC] HARD SEEK position=${expectedPosition.toFixed(3)}`);
-            audio.currentTime = expectedPosition;
-            setCurrentTime(expectedPosition);
-            lastHardSeekRef.current = Date.now();
-          }
-        }
-        
-        if (audio.paused) {
-          await audio.play();
-          console.log('[SYNC] AUDIO PLAYING');
-          setAutoplayBlocked(false);
-          wasBufferingRef.current = false;
-        }
-      } catch (error) {
-        console.error('[SYNC] AUDIO PLAY FAILED', error);
-        setAutoplayBlocked(true);
+    const expectedPosition = getExpectedPlaybackPosition(latestPlaybackStateRef.current ?? state, localStateReceiveTimeRef.current || undefined);
+    if (Number.isFinite(expectedPosition)) {
+      const currentPos = player.getCurrentTime() || 0;
+      console.log(`[SYNC] EXPECTED POSITION: ${expectedPosition.toFixed(3)}s, ACTUAL POSITION: ${currentPos.toFixed(3)}s`);
+      const drift = Math.abs(expectedPosition - currentPos);
+      if (drift > 0.5) {
+        console.log(`[SYNC] HARD SEEK position=${expectedPosition.toFixed(3)}`);
+        player.seekTo(expectedPosition, 'seconds');
+        setCurrentTime(expectedPosition);
+        lastHardSeekRef.current = Date.now();
       }
-    };
-
-    void applyPlay();
+    }
+    
+    setIsAudioPlaying(true);
+    console.log('[SYNC] AUDIO PLAYING');
+    setAutoplayBlocked(false);
+    wasBufferingRef.current = false;
   };
 
   useEffect(() => {
@@ -1337,110 +1313,32 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     }
   };
 
-  const loadCurrentAudio = () => {
-    const audio = audioRef.current;
-    const nextSource = getCurrentAudioUrl();
-    if (!audio || !nextSource || nextSource.startsWith('blob:') || nextSource.startsWith('file:')) return '';
-
-    if (audio.src !== nextSource) {
-      audio.src = nextSource;
-      setCurrentTime(0);
-      setAudioDuration(0);
-      audio.load();
-    }
-    return nextSource;
-  };
-
-  const waitForAudioReady = (audio: HTMLAudioElement) => {
-    if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return Promise.resolve();
-    return new Promise<void>((resolve, reject) => {
-      const handleReady = () => {
-        cleanup();
-        resolve();
-      };
-      const handleError = () => {
-        cleanup();
-        reject(new Error('The audio source could not be loaded.'));
-      };
-      const cleanup = () => {
-        audio.removeEventListener('canplay', handleReady);
-        audio.removeEventListener('canplaythrough', handleReady);
-        audio.removeEventListener('error', handleError);
-      };
-      audio.addEventListener('canplay', handleReady);
-      audio.addEventListener('canplaythrough', handleReady);
-      audio.addEventListener('error', handleError);
-    });
-  };
-
-  const syncActiveSource = async () => {
-    const audio = audioRef.current;
-    if (!audio || !currentItem || isHost) return;
-
-    const nextSource = getCurrentAudioUrl();
-    if (!nextSource || nextSource.startsWith('blob:') || nextSource.startsWith('file:')) return;
-    
-    if (audio.src !== nextSource) {
-      audio.src = nextSource;
-      audio.load();
-      setCurrentTime(0);
-      setAudioDuration(0);
-      
-      try {
-        await waitForAudioReady(audio);
-        const currentPlayback = latestPlaybackStateRef.current ?? playback;
-        if (currentPlayback) {
-          applyAuthoritativePlaybackState(currentPlayback);
-        }
-      } catch (err) {
-        console.error('AUDIO LOAD ERROR', err);
-        setAutoplayBlocked(true);
-      }
-    }
-  };
-
-  // Strict drift correction interval (ONLY runs while playing)
+  // Drift correction interval
   useEffect(() => {
     if (isHost) return;
     
     const syncInterval = window.setInterval(() => {
       const state = latestPlaybackStateRef.current;
-      // Do not run drift correction if paused or missing state.
-      // audio.play() and audio.pause() are strictly handled by applyAuthoritativePlaybackState.
       if (!state || state.is_playing === false) {
-        if (audioRef.current && audioRef.current.playbackRate !== 1) {
-          audioRef.current.playbackRate = 1;
-        }
         return;
       }
       
-      const audio = audioRef.current;
-      if (!audio || audio.paused || audio.readyState < 1) return; // Wait for applyAuthoritativePlaybackState to play it first
+      const player = playerRef.current;
+      if (!player) return;
       
       const expectedPosition = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
       if (Number.isFinite(expectedPosition)) {
-         const drift = expectedPosition - audio.currentTime;
+         const currentPos = player.getCurrentTime() || 0;
+         const drift = expectedPosition - currentPos;
          const absDrift = Math.abs(drift);
          
-         if (absDrift < 0.5) {
-           // Small drift, do nothing, reset rate if modified
-           if (audio.playbackRate !== 1) audio.playbackRate = 1;
-         } else if (absDrift >= 0.5 && absDrift <= 1.5) {
-           // Medium drift, gently adjust playback rate
-           const targetRate = drift > 0 ? 1.02 : 0.98;
-           if (Math.abs(audio.playbackRate - targetRate) > 0.01) {
-             console.log(`[SYNC] RATE CORRECTION drift=${drift.toFixed(3)}s, rate=${targetRate}`);
-             audio.playbackRate = targetRate;
-           }
-         } else {
-           // Large drift, hard seek
+         if (absDrift >= 1.5) {
            const now = Date.now();
            if (now - lastHardSeekRef.current > 4000) {
              console.log(`[SYNC] HARD CORRECTION drift=${drift.toFixed(3)}s`);
-             audio.currentTime = expectedPosition;
+             player.seekTo(expectedPosition, 'seconds');
              setCurrentTime(expectedPosition);
              lastHardSeekRef.current = now;
-             if (audio.playbackRate !== 1) audio.playbackRate = 1;
            } else {
              console.log(`[SYNC] HARD SEEK BLOCKED BY COOLDOWN drift=${drift.toFixed(3)}s`);
            }
@@ -1448,12 +1346,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       }
     }, 1000);
     
-    return () => {
-      window.clearInterval(syncInterval);
-      if (audioRef.current && audioRef.current.playbackRate !== 1) {
-        audioRef.current.playbackRate = 1;
-      }
-    };
+    return () => window.clearInterval(syncInterval);
   }, [isHost]);
 
   useEffect(() => {
@@ -1547,11 +1440,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     });
   }, [userId]);
 
-  useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.volume = volume;
-    }
-  }, [volume]);
+
 
   useEffect(() => {
     if (!supabase || !roomId) return;
@@ -1574,7 +1463,17 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         const data = payload.payload as { command?: string; roomId?: string; playbackState?: PlaybackState } | undefined;
         if (!data || data.roomId !== roomId || !data.playbackState) return;
 
+        const command = data.command;
         const nextState = data.playbackState;
+        
+        if (command === 'SYNC') {
+          // Telemetry - update reference silently for drift correction interval
+          latestPlaybackStateRef.current = nextState;
+          localStateReceiveTimeRef.current = Date.now();
+          if (!isHost) setPlayback(nextState);
+          return;
+        }
+
         const nextSequence = Number(nextState.sequence_number ?? -1);
         const previousSequence = lastProcessedSequenceRef.current ?? -1;
 
@@ -1586,7 +1485,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         lastProcessedSequenceRef.current = nextSequence;
         latestPlaybackStateRef.current = nextState;
         localStateReceiveTimeRef.current = Date.now();
-        console.log(`[SYNC] MEMBER RECEIVED state sequence=${nextSequence} playing=${nextState.is_playing}`);
+        console.log(`[SYNC] MEMBER RECEIVED COMMAND sequence=${nextSequence} playing=${nextState.is_playing}`);
         applyAuthoritativePlaybackState(nextState);
         if (!isHost) setPlayback(nextState);
       })
@@ -1608,8 +1507,16 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         const nextSequence = Number(nextState.sequence_number ?? -1);
         const previousSequence = lastProcessedSequenceRef.current ?? -1;
 
-        if (nextSequence <= previousSequence) {
+        if (nextSequence < previousSequence) {
           console.log(`[SYNC] IGNORED STALE sequence=${nextSequence}`, { previousSequence, nextState });
+          return;
+        }
+
+        if (nextSequence === previousSequence && previousSequence !== -1) {
+          // Pure telemetry
+          latestPlaybackStateRef.current = nextState;
+          localStateReceiveTimeRef.current = Date.now();
+          if (!isHost) setPlayback(nextState);
           return;
         }
 
@@ -1626,8 +1533,16 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         const nextSequence = Number(nextState.sequence_number ?? -1);
         const previousSequence = lastProcessedSequenceRef.current ?? -1;
 
-        if (nextSequence <= previousSequence) {
+        if (nextSequence < previousSequence) {
           console.log(`[SYNC] IGNORED STALE sequence=${nextSequence}`, { previousSequence, nextState });
+          return;
+        }
+
+        if (nextSequence === previousSequence && previousSequence !== -1) {
+          // Pure telemetry update without a sequence bump
+          latestPlaybackStateRef.current = nextState;
+          localStateReceiveTimeRef.current = Date.now();
+          if (!isHost) setPlayback(nextState);
           return;
         }
 
@@ -1698,12 +1613,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       is_host: room?.host_id === userId,
     });
   }, [profileName, room?.host_id, connectionStatus, userId]);
-
-  useEffect(() => {
-    if (currentItem && audioRef.current && !isHost) {
-      void syncActiveSource();
-    }
-  }, [currentItem, isHost]);
 
   const handleAddSearchResult = async (track: { title: string; artist: string; media_id: string; artwork_url: string | null; duration_ms: number; source_type: string }) => {
     if (!supabase || !isHost) return;
@@ -1909,8 +1818,10 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           server_timestamp: new Date().toISOString(),
         }, 'SONG_CHANGE');
       } else {
-        audioRef.current?.pause();
-        await updatePlayback({ media_id: null, title: null, artist: null, artwork_url: null, is_playing: false, position_ms: 0, server_timestamp: new Date().toISOString() }, 'PAUSE');
+        if (isHost) {
+          setIsAudioPlaying(false);
+          await updatePlayback({ media_id: null, title: null, artist: null, artwork_url: null, is_playing: false, position_ms: 0, server_timestamp: new Date().toISOString() }, 'PAUSE');
+        }
       }
     }
   };
@@ -1978,7 +1889,11 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       sequence_number: 0,
     };
 
-    const nextSequence = (nextState.sequence_number ?? current.sequence_number ?? 0) + 1;
+    const shouldIncrementSequence = command !== 'SYNC';
+    const nextSequence = shouldIncrementSequence 
+      ? (nextState.sequence_number ?? current.sequence_number ?? 0) + 1 
+      : (current.sequence_number ?? 0);
+
     const payload = {
       room_id: roomId,
       media_id: nextState.media_id ?? current.media_id,
@@ -1992,10 +1907,12 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       sequence_number: nextSequence,
     };
 
-    if (command === 'PLAY' || (command === 'SYNC' && payload.is_playing)) {
+    if (command === 'PLAY') {
       console.log(`[SYNC] HOST PLAY sequence=${nextSequence}`);
-    } else if (command === 'PAUSE' || (command === 'SYNC' && !payload.is_playing)) {
+    } else if (command === 'PAUSE') {
       console.log(`[SYNC] HOST PAUSE sequence=${nextSequence}`);
+    } else if (command === 'SYNC') {
+      // console.log(`[SYNC] HOST TELEMETRY sequence=${nextSequence}`);
     }
 
     // 1. Broadcast immediately for instant realtime sync across members
@@ -2015,19 +1932,17 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   };
 
   const handleHostPause = async () => {
-    if (!supabase || !audioRef.current || !roomId || !isHost) return;
+    if (!supabase || !playerRef.current || !roomId || !isHost) return;
 
-    const positionMs = Math.round(audioRef.current.currentTime * 1000);
+    const positionMs = Math.round((playerRef.current.getCurrentTime() || 0) * 1000);
     const serverTimestamp = new Date().toISOString();
     
     console.log('HOST PAUSE BUTTON CLICKED');
     clearScheduledPlay();
 
-    audioRef.current.pause();
-    audioRef.current.playbackRate = 1;
-    audioRef.current.currentTime = positionMs / 1000;
-    setCurrentTime(positionMs / 1000);
     setIsAudioPlaying(false);
+    playerRef.current.seekTo(positionMs / 1000, 'seconds');
+    setCurrentTime(positionMs / 1000);
 
     await updatePlayback({
       is_playing: false,
@@ -2037,39 +1952,24 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   };
 
   const handlePlayPause = async () => {
-    if (!audioRef.current || !currentItem || !isHost) return;
+    if (!playerRef.current || !currentItem || !isHost) return;
 
-    const audio = audioRef.current;
     clearScheduledPlay();
-    const shouldPlay = audio.paused;
+    const shouldPlay = !isAudioPlaying;
 
     if (shouldPlay) {
       const audioUrl = getCurrentAudioUrl();
       if (!audioUrl) {
-        const message = 'Unable to play this audio: no playable Storage URL is available.';
-        console.error('AUDIO PLAY ERROR', message);
+        const message = 'Unable to play this media: no playable URL is available.';
+        console.error('PLAY ERROR', message);
         notify(message);
         return;
       }
 
-      if (audio.src !== audioUrl) {
-        audio.src = audioUrl;
-        audio.load();
-      }
-
-      const nextPosition = Number.isFinite(audio.currentTime) ? audio.currentTime : Number(playback?.position_ms || 0) / 1000;
-      audio.currentTime = nextPosition;
-
-      try {
-        await waitForAudioReady(audio);
-        await audio.play();
-        setAutoplayBlocked(false);
-      } catch (playError) {
-        console.error('AUDIO PLAY ERROR', playError);
-        setAutoplayBlocked(true);
-        notify(`Unable to play this audio: ${playError instanceof Error ? playError.message : String(playError)}`);
-        return;
-      }
+      setIsAudioPlaying(true);
+      setAutoplayBlocked(false);
+      
+      const nextPosition = Number.isFinite(playerRef.current.getCurrentTime()) ? playerRef.current.getCurrentTime() : Number(playback?.position_ms || 0) / 1000;
 
       const hostTimestamp = new Date().toISOString();
       const sequenceNumber = (latestPlaybackStateRef.current?.sequence_number ?? playback?.sequence_number ?? 0) + 1;
@@ -2079,7 +1979,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         artist: currentItem.artist,
         artwork_url: currentItem.artwork_url,
         is_playing: true,
-        position_ms: Math.round(audio.currentTime * 1000),
+        position_ms: Math.round(nextPosition * 1000),
         server_timestamp: hostTimestamp,
         sequence_number: sequenceNumber,
       }, 'PLAY');
@@ -2089,38 +1989,20 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   };
 
   const handleSyncAndPlay = async () => {
-    const audio = audioRef.current;
-    if (!audio || !playback || !currentItem) return;
+    if (!playerRef.current || !playback || !currentItem) return;
 
     clearScheduledPlay();
     const latestState = latestPlaybackStateRef.current ?? playback;
+    
     if (!latestState.is_playing) {
       applyAuthoritativePlaybackState(latestState);
       return;
     }
 
-    const source = getCurrentAudioUrl();
-    if (!source || source.startsWith('blob:') || source.startsWith('file:')) return;
-    if (audio.src !== source) {
-      audio.src = source;
-      audio.load();
-    }
-
     const expectedPosition = getExpectedPlaybackPosition(latestState);
-    audio.currentTime = expectedPosition;
-
-    try {
-      await waitForAudioReady(audio);
-      if (latestState.is_playing) {
-        await audio.play();
-      } else {
-        audio.pause();
-      }
-      setAutoplayBlocked(false);
-    } catch (playError) {
-      console.error('AUDIO PLAY ERROR', playError);
-      notify(`Unable to play this audio: ${playError instanceof Error ? playError.message : String(playError)}`);
-    }
+    playerRef.current.seekTo(expectedPosition, 'seconds');
+    setIsAudioPlaying(true);
+    setAutoplayBlocked(false);
   };
 
   const handleSelectTrack = async (item: QueueItem) => {
@@ -2145,60 +2027,45 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     if (!nextItem) return;
 
     const source = getQueueAudioUrl(nextItem);
-    const audio = audioRef.current;
-    if (!audio || !source || source.startsWith('blob:') || source.startsWith('file:')) return;
+    if (!source || source.startsWith('blob:') || source.startsWith('file:')) return;
 
     const shouldKeepPlaying = playback?.is_playing ?? false;
-    audio.src = source;
-    audio.load();
     setCurrentTime(0);
     setAudioDuration(0);
-    try {
-      await waitForAudioReady(audio);
-      if (shouldKeepPlaying) {
-        await audio.play();
-      } else {
-        audio.pause();
-      }
-      setAutoplayBlocked(false);
-      await updatePlayback({
-        media_id: nextItem.media_id,
-        title: nextItem.title,
-        artist: nextItem.artist,
-        artwork_url: nextItem.artwork_url,
-        is_playing: shouldKeepPlaying,
-        position_ms: 0,
-        server_timestamp: new Date().toISOString(),
-      }, 'SONG_CHANGE');
-    } catch (playError) {
-      console.error('AUDIO PLAY ERROR', playError);
-      setAutoplayBlocked(true);
-      notify(`Unable to play this audio: ${playError instanceof Error ? playError.message : String(playError)}`);
-    }
+    setIsAudioPlaying(shouldKeepPlaying);
+    setAutoplayBlocked(false);
+
+    await updatePlayback({
+      media_id: nextItem.media_id,
+      title: nextItem.title,
+      artist: nextItem.artist,
+      artwork_url: nextItem.artwork_url,
+      is_playing: shouldKeepPlaying,
+      position_ms: 0,
+      server_timestamp: new Date().toISOString(),
+    }, 'SONG_CHANGE');
   };
 
   const handleSeek = async (value: number) => {
-    if (!audioRef.current || !isHost) return;
+    if (!playerRef.current || !isHost) return;
     const seekTime = value;
-    audioRef.current.currentTime = seekTime;
+    playerRef.current.seekTo(seekTime, 'seconds');
     setCurrentTime(seekTime);
     await updatePlayback({
       media_id: currentItem?.media_id ?? null,
       title: currentItem?.title ?? null,
       artist: currentItem?.artist ?? null,
       artwork_url: currentItem?.artwork_url ?? null,
-      is_playing: playback?.is_playing ?? !audioRef.current.paused,
+      is_playing: isAudioPlaying,
       position_ms: Math.round(seekTime * 1000),
       server_timestamp: new Date().toISOString(),
     }, 'SEEK');
   };
 
-  const handleTimeUpdate = async () => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    setCurrentTime(audio.currentTime);
+  const handleProgress = async (state: { playedSeconds: number, loadedSeconds: number }) => {
+    setCurrentTime(state.playedSeconds);
     if (!isHost) return;
-    const positionInfo = Math.round(audio.currentTime * 1000);
+    const positionInfo = Math.round(state.playedSeconds * 1000);
     if (Date.now() - lastSyncRef.current > 1500) {
       lastSyncRef.current = Date.now();
       await updatePlayback({
@@ -2206,10 +2073,9 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         title: currentItem?.title ?? null,
         artist: currentItem?.artist ?? null,
         artwork_url: currentItem?.artwork_url ?? null,
-        is_playing: !audio.paused,
+        is_playing: isAudioPlaying,
         position_ms: positionInfo,
         server_timestamp: new Date().toISOString(),
-        sequence_number: (playback?.sequence_number ?? 0) + 1,
       });
     }
   };
@@ -2333,58 +2199,45 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
           {autoplayBlocked && <button className="secondary-button full" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button>}
 
-          <audio
-            ref={audioRef}
-            onLoadedMetadata={(event) => {
-              setAudioDuration((event.currentTarget.duration || 0) * 1000);
-              setCurrentTime(event.currentTarget.currentTime || 0);
-            }}
-            onTimeUpdate={handleTimeUpdate}
-            onCanPlay={() => console.log('AUDIO CAN PLAY', audioRef.current?.src)}
-            onPlay={() => {
-              setIsAudioPlaying(true);
-              console.log('AUDIO PLAY', audioRef.current?.src);
-            }}
-            onPlaying={() => {
+          {React.createElement(ReactPlayer as any, {
+            ref: playerRef,
+            url: getCurrentAudioUrl(),
+            playing: isAudioPlaying,
+            volume: volume,
+            width: "100%",
+            height: "100%",
+            style: { opacity: currentItem?.source_type === 'youtube' ? 1 : 0, position: 'absolute', top: 0, left: 0 },
+            config: { youtube: { playerVars: { controls: 0, disablekb: 1, modestbranding: 1 } } },
+            onProgress: handleProgress,
+            onDuration: (dur: number) => setAudioDuration(dur * 1000),
+            onPlay: () => setIsAudioPlaying(true),
+            onPause: () => setIsAudioPlaying(false),
+            onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
+            onBufferEnd: () => {
               if (!isHost && wasBufferingRef.current) {
                 const state = latestPlaybackStateRef.current;
-                if (state && state.is_playing && audioRef.current) {
+                if (state && state.is_playing && playerRef.current) {
                   const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
                   if (Number.isFinite(expected)) {
-                    const drift = Math.abs(expected - audioRef.current.currentTime);
+                    const drift = Math.abs(expected - (playerRef.current.getCurrentTime() || 0));
                     if (drift > 0.5) {
-                      console.log(`[SYNC] RECOVERED FROM BUFFERING, drift=${drift.toFixed(3)}s`);
-                      audioRef.current.currentTime = expected;
-                      console.log('[SYNC] JUMPED TO LIVE HOST POSITION');
+                      playerRef.current.seekTo(expected, 'seconds');
                       lastHardSeekRef.current = Date.now();
                     }
                   }
                 }
                 wasBufferingRef.current = false;
               }
-              console.log('[SYNC] NORMAL PLAYING EVENT');
-            }}
-            onPause={() => {
-              setIsAudioPlaying(false);
-              console.log('AUDIO PAUSE', audioRef.current?.src);
-            }}
-            onWaiting={() => console.log('[SYNC] BUFFERING', audioRef.current?.src)}
-            onCanPlayThrough={() => console.log('AUDIO CAN PLAY THROUGH', audioRef.current?.src)}
-            onError={(event) => {
-              const audio = event.currentTarget;
-              console.error('HTML AUDIO ERROR', {
-                src: audio.src,
-                error: audio.error,
-                code: audio.error?.code,
-                message: audio.error?.message,
-              });
-              notify(`Unable to play this audio: ${audio.error?.message || 'The audio file could not be loaded.'}`);
-            }}
-            onEnded={() => {
+            },
+            onError: (e: any) => {
+              console.error('PLAYER ERROR', e);
+              setAutoplayBlocked(true);
+            },
+            onEnded: () => {
               setIsAudioPlaying(false);
               void handleAdjacentTrack(1);
-            }}
-          />
+            }
+          })}
         </section>
 
         <div>
@@ -2513,12 +2366,21 @@ function SearchMusicModal({
     setHasSearched(true);
     
     try {
-      const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=20`);
+      const apiKey = import.meta.env.VITE_YOUTUBE_API_KEY;
+      if (!apiKey) {
+        throw new Error('YOUTUBE_KEY_MISSING');
+      }
+
+      const response = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=20&q=${encodeURIComponent(q)}&key=${apiKey}`);
       if (!response.ok) throw new Error('Search failed');
       const data = await response.json();
-      setResults(data.results || []);
-    } catch (err) {
-      setError('Failed to load search results.');
+      setResults(data.items || []);
+    } catch (err: any) {
+      if (err.message === 'YOUTUBE_KEY_MISSING') {
+        setError('YouTube API key is missing. Please add VITE_YOUTUBE_API_KEY to your environment variables to enable full-length YouTube playback search.');
+      } else {
+        setError('Failed to load search results.');
+      }
       setResults([]);
     } finally {
       setLoading(false);
@@ -2526,15 +2388,38 @@ function SearchMusicModal({
   };
 
   const handleAdd = async (track: any) => {
-    setAddingId(track.trackId.toString());
+    setAddingId(track.id.videoId);
     try {
+      let fetchedDurationMs = 0;
+      const apiKey = import.meta.env.VITE_YOUTUBE_API_KEY;
+      if (apiKey) {
+        try {
+          const detailRes = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=${track.id.videoId}&key=${apiKey}`);
+          if (detailRes.ok) {
+            const detailData = await detailRes.json();
+            const isoDuration = detailData.items?.[0]?.contentDetails?.duration;
+            if (isoDuration) {
+              const match = isoDuration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+              if (match) {
+                const hours = parseInt(match[1] || '0', 10);
+                const minutes = parseInt(match[2] || '0', 10);
+                const seconds = parseInt(match[3] || '0', 10);
+                fetchedDurationMs = (hours * 3600 + minutes * 60 + seconds) * 1000;
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Failed to fetch video duration", e);
+        }
+      }
+
       await onAddSong({
-        title: track.trackName,
-        artist: track.artistName,
-        media_id: track.previewUrl,
-        artwork_url: track.artworkUrl100?.replace('100x100bb', '600x600bb') || null,
-        duration_ms: track.trackTimeMillis || 30000,
-        source_type: 'itunes',
+        title: track.snippet.title,
+        artist: track.snippet.channelTitle,
+        media_id: `https://www.youtube.com/watch?v=${track.id.videoId}`,
+        artwork_url: track.snippet.thumbnails.high?.url || track.snippet.thumbnails.default?.url || null,
+        duration_ms: fetchedDurationMs,
+        source_type: 'youtube',
       });
     } finally {
       setAddingId(null);
@@ -2593,19 +2478,19 @@ function SearchMusicModal({
           {hasSearched && !loading && results.length > 0 && (
             <div className="search-results-list">
               {results.map(track => (
-                <div key={track.trackId} className="search-result-item">
-                  <img src={track.artworkUrl100} alt={track.trackName} className="search-result-art" />
+                <div key={track.id.videoId} className="search-result-item">
+                  <img src={track.snippet.thumbnails.default?.url} alt={track.snippet.title} className="search-result-art" />
                   <div className="search-result-info">
-                    <h4>{track.trackName}</h4>
-                    <p>{track.artistName}</p>
+                    <h4>{track.snippet.title}</h4>
+                    <p>{track.snippet.channelTitle}</p>
                   </div>
                   <button
                     className="primary-button small"
-                    disabled={addingId === track.trackId.toString()}
+                    disabled={addingId === track.id.videoId}
                     onClick={() => void handleAdd(track)}
                     style={{ padding: '6px 12px', fontSize: '13px', minWidth: '70px' }}
                   >
-                    {addingId === track.trackId.toString() ? <LoaderCircle className="spin" size={14} /> : <><Plus size={14} style={{marginRight:4}} /> Add</>}
+                    {addingId === track.id.videoId ? <LoaderCircle className="spin" size={14} /> : <><Plus size={14} style={{marginRight:4}} /> Add</>}
                   </button>
                 </div>
               ))}
