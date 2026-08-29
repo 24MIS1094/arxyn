@@ -1193,14 +1193,23 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
     }
 
     const payload = {
+      action: command.toLowerCase(),
       command,
+      isPlaying: command === 'PLAY',
       roomId,
       position_ms: positionMs,
       timestamp_ms: Date.now(),
+      timestamp: Date.now(),
       commandId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     };
 
-    console.log(command === 'PLAY' ? 'HOST PLAY SENT' : 'HOST PAUSE SENT', payload);
+    if (command === 'PLAY') {
+      console.log('HOST PLAY SENT', payload);
+    } else if (command === 'PAUSE') {
+      console.log('HOST PAUSE CLICKED');
+      console.log('HOST PAUSE MESSAGE SENT', payload);
+    }
+
     await channel.send({
       type: 'broadcast',
       event: 'playback-command',
@@ -1530,10 +1539,13 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
         setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
       })
       .on('broadcast', { event: 'playback-command' }, (payload) => {
-        const command = payload.payload as { command?: string; roomId?: string; position_ms?: number; timestamp_ms?: number; commandId?: string } | undefined;
+        const command = payload.payload as { action?: string; command?: string; isPlaying?: boolean; roomId?: string; position_ms?: number; timestamp_ms?: number; commandId?: string } | undefined;
         if (!command || command.roomId !== roomId) return;
 
-        if (command.command === 'PLAY') {
+        const action = (command.action ?? command.command ?? '').toLowerCase();
+        const isPlaying = typeof command.isPlaying === 'boolean' ? command.isPlaying : action === 'play';
+
+        if (isPlaying === true || action === 'play') {
           console.log('PLAY COMMAND RECEIVED', command);
           const audio = audioRef.current;
           if (!audio) return;
@@ -1560,8 +1572,8 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           return;
         }
 
-        if (command.command === 'PAUSE') {
-          console.log('PAUSE COMMAND RECEIVED');
+        if (isPlaying === false || action === 'pause') {
+          console.log('PARTICIPANT PAUSE MESSAGE RECEIVED', command);
           if (scheduledPlayTimeoutRef.current) {
             clearTimeout(scheduledPlayTimeoutRef.current);
             scheduledPlayTimeoutRef.current = null;
@@ -1591,7 +1603,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           setCurrentTime(audio.currentTime);
           setIsAudioPlaying(false);
           setPlayback(nextState);
-          console.log('FOLLOWER AUDIO PAUSED');
+          console.log('PARTICIPANT audio.pause() EXECUTED', { roomId, position_ms: Number(command.position_ms ?? 0) });
           return;
         }
       })
