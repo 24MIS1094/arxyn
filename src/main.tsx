@@ -1102,6 +1102,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
   const latestPlaybackStateRef = useRef<PlaybackState | null>(null);
   const lastSequenceNumberRef = useRef<number | null>(null);
   const lastProcessedSequenceRef = useRef<number | null>(null);
+  const roomChannelRef = useRef<any>(null);
 
   const isHost = room?.host_id === userId;
   const currentItem = queue.find((item) => playback && item.media_id === playback.media_id) ?? queue[0] ?? null;
@@ -1138,6 +1139,30 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       window.clearTimeout(scheduledPlayTimeoutRef.current);
       scheduledPlayTimeoutRef.current = null;
     }
+  };
+
+  const sendRealtimePlaybackCommand = async (command: 'PLAY' | 'PAUSE' | 'SEEK' | 'SONG_CHANGE', positionMs: number) => {
+    if (!supabase || !roomId) return;
+    const channel = roomChannelRef.current;
+    if (!channel) {
+      console.warn('No room channel available for playback command');
+      return;
+    }
+
+    const payload = {
+      command,
+      roomId,
+      position_ms: positionMs,
+      timestamp_ms: Date.now(),
+      commandId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    };
+
+    console.log(command === 'PLAY' ? 'HOST PLAY SENT' : 'HOST PAUSE SENT', payload);
+    await channel.send({
+      type: 'broadcast',
+      event: 'playback-command',
+      payload,
+    });
   };
 
   const applyRemotePlaybackState = (state: PlaybackState) => {
@@ -1298,7 +1323,6 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
     const latestState = latestPlaybackStateRef.current ?? playback;
     if (!latestState || latestState.is_playing === false) {
-      handleRemotePause(latestState ?? playback);
       return;
     }
 
@@ -1322,16 +1346,15 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
     if (!playback || !currentItem || isHost) return;
 
     const syncInterval = window.setInterval(() => {
-      const latestState = latestPlaybackStateRef.current ?? playback;
+      const state = latestPlaybackStateRef.current ?? playback;
       const audio = audioRef.current;
       if (!audio) return;
 
-      if (!latestState || latestState.is_playing === false) {
-        handleRemotePause(latestState ?? playback);
+      if (!state || state.is_playing === false) {
         return;
       }
 
-      const expectedPosition = getExpectedPlaybackPosition(latestState);
+      const expectedPosition = getExpectedPlaybackPosition(state);
       const drift = expectedPosition - audio.currentTime;
 
       if (Math.abs(drift) > 0.5) {
@@ -1435,8 +1458,75 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
     const client = supabase;
 
     const channel = client.channel(`room:${roomId}`);
+    roomChannelRef.current = channel;
 
     channel
+      .on('broadcast', { event: 'playback-command' }, (payload) => {
+        const command = payload.payload as { command?: string; roomId?: string; position_ms?: number; timestamp_ms?: number; commandId?: string } | undefined;
+        if (!command || command.roomId !== roomId) return;
+
+        if (command.command === 'PLAY') {
+          console.log('PLAY COMMAND RECEIVED', command);
+          const audio = audioRef.current;
+          if (!audio) return;
+          clearScheduledPlay();
+          audio.currentTime = Number(command.position_ms ?? 0) / 1000;
+          setCurrentTime(audio.currentTime);
+          void audio.play().catch(() => setAutoplayBlocked(true));
+
+          const nextState: PlaybackState = {
+            room_id: roomId,
+            media_id: currentItem?.media_id ?? playback?.media_id ?? null,
+            title: currentItem?.title ?? playback?.title ?? null,
+            artist: currentItem?.artist ?? playback?.artist ?? null,
+            artwork_url: currentItem?.artwork_url ?? playback?.artwork_url ?? null,
+            is_playing: true,
+            position_ms: Number(command.position_ms ?? 0),
+            server_timestamp: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            sequence_number: (latestPlaybackStateRef.current?.sequence_number ?? playback?.sequence_number ?? 0) + 1,
+          };
+
+          latestPlaybackStateRef.current = nextState;
+          setPlayback(nextState);
+          return;
+        }
+
+        if (command.command === 'PAUSE') {
+          console.log('PAUSE COMMAND RECEIVED');
+          if (scheduledPlayTimeoutRef.current) {
+            clearTimeout(scheduledPlayTimeoutRef.current);
+            scheduledPlayTimeoutRef.current = null;
+          }
+
+          const audio = audioRef.current;
+          if (!audio) return;
+
+          audio.pause();
+          audio.playbackRate = 1;
+          audio.currentTime = Number(command.position_ms ?? 0) / 1000;
+
+          const nextState: PlaybackState = {
+            room_id: roomId,
+            media_id: currentItem?.media_id ?? playback?.media_id ?? null,
+            title: currentItem?.title ?? playback?.title ?? null,
+            artist: currentItem?.artist ?? playback?.artist ?? null,
+            artwork_url: currentItem?.artwork_url ?? playback?.artwork_url ?? null,
+            is_playing: false,
+            position_ms: Number(command.position_ms ?? 0),
+            server_timestamp: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            sequence_number: (latestPlaybackStateRef.current?.sequence_number ?? playback?.sequence_number ?? 0) + 1,
+          };
+
+          latestPlaybackStateRef.current = nextState;
+          setCurrentTime(audio.currentTime);
+          setIsAudioPlaying(false);
+          setPlayback(nextState);
+          console.log('FOLLOWER AUDIO PAUSED');
+          return;
+        }
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, (payload) => {
         if (payload.eventType === 'DELETE') {
           notify('Room has been deleted.');
@@ -1796,6 +1886,9 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       updated_at: serverTimestamp,
     };
 
+    console.log('HOST PAUSE SENT', { roomId, position_ms: positionMs, timestamp_ms: Date.now(), commandId: `${Date.now()}-${Math.random().toString(16).slice(2)}` });
+    clearScheduledPlay();
+    await sendRealtimePlaybackCommand('PAUSE', positionMs);
     console.log('HOST PAUSE BUTTON CLICKED');
     console.log('HOST WRITING PAUSE STATE', playbackState);
 
@@ -1875,6 +1968,8 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
       try {
         await waitForAudioReady(audio);
+        console.log('HOST PLAY SENT', { roomId, position_ms: Math.round(audio.currentTime * 1000), timestamp_ms: Date.now() });
+        await sendRealtimePlaybackCommand('PLAY', Math.round(audio.currentTime * 1000));
         await audio.play();
         setAutoplayBlocked(false);
       } catch (playError) {
