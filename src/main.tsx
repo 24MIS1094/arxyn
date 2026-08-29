@@ -1242,21 +1242,45 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     }
 
     // PLAYING BRANCH
-    console.log(`[SYNC] MEMBER PLAYED sequence=${state.sequence_number}`);
-    const expectedPosition = getExpectedPlaybackPosition(state);
-    if (Number.isFinite(expectedPosition)) {
-      const drift = Math.abs(expectedPosition - audio.currentTime);
-      if (drift > 0.5) {
-        audio.currentTime = expectedPosition;
-        setCurrentTime(expectedPosition);
-      }
-    }
+    console.log(`[SYNC] MEMBER RECEIVED PLAY sequence=${state.sequence_number}`);
     
-    if (audio.paused) {
-      void audio.play().catch(() => {
+    const applyPlay = async () => {
+      try {
+        if (audio.readyState < 1) { // HAVE_METADATA
+          await new Promise<void>((resolve, reject) => {
+            const onMetadata = () => { cleanup(); resolve(); };
+            const onError = () => { cleanup(); reject(new Error('Audio load failed')); };
+            const cleanup = () => {
+              audio.removeEventListener('loadedmetadata', onMetadata);
+              audio.removeEventListener('error', onError);
+            };
+            audio.addEventListener('loadedmetadata', onMetadata);
+            audio.addEventListener('error', onError);
+          });
+        }
+
+        const expectedPosition = getExpectedPlaybackPosition(latestPlaybackStateRef.current ?? state);
+        if (Number.isFinite(expectedPosition)) {
+          console.log(`[SYNC] EXPECTED POSITION: ${expectedPosition.toFixed(3)}s, ACTUAL POSITION: ${audio.currentTime.toFixed(3)}s`);
+          const drift = Math.abs(expectedPosition - audio.currentTime);
+          if (drift > 0.25) {
+            audio.currentTime = expectedPosition;
+            setCurrentTime(expectedPosition);
+          }
+        }
+        
+        if (audio.paused) {
+          await audio.play();
+          console.log('[SYNC] AUDIO PLAYING');
+          setAutoplayBlocked(false);
+        }
+      } catch (error) {
+        console.error('[SYNC] AUDIO PLAY FAILED', error);
         setAutoplayBlocked(true);
-      });
-    }
+      }
+    };
+
+    void applyPlay();
   };
 
   useEffect(() => {
@@ -1364,22 +1388,47 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       const state = latestPlaybackStateRef.current;
       // Do not run drift correction if paused or missing state.
       // audio.play() and audio.pause() are strictly handled by applyAuthoritativePlaybackState.
-      if (!state || state.is_playing === false) return;
+      if (!state || state.is_playing === false) {
+        if (audioRef.current && audioRef.current.playbackRate !== 1) {
+          audioRef.current.playbackRate = 1;
+        }
+        return;
+      }
       
       const audio = audioRef.current;
-      if (!audio || audio.paused) return; // Wait for applyAuthoritativePlaybackState to play it first
+      if (!audio || audio.paused || audio.readyState < 1) return; // Wait for applyAuthoritativePlaybackState to play it first
       
       const expectedPosition = getExpectedPlaybackPosition(state);
       if (Number.isFinite(expectedPosition)) {
-         const drift = Math.abs(expectedPosition - audio.currentTime);
-         if (drift > 0.5) {
+         const drift = expectedPosition - audio.currentTime;
+         const absDrift = Math.abs(drift);
+         
+         if (absDrift < 0.25) {
+           // Small drift, do nothing, reset rate if modified
+           if (audio.playbackRate !== 1) audio.playbackRate = 1;
+         } else if (absDrift >= 0.25 && absDrift <= 1.0) {
+           // Medium drift, gently adjust playback rate
+           const targetRate = drift > 0 ? 1.05 : 0.95;
+           if (Math.abs(audio.playbackRate - targetRate) > 0.01) {
+             console.log(`[SYNC] RATE CORRECTION drift=${drift.toFixed(3)}s, rate=${targetRate}`);
+             audio.playbackRate = targetRate;
+           }
+         } else {
+           // Large drift, hard seek
+           console.log(`[SYNC] HARD CORRECTION drift=${drift.toFixed(3)}s`);
            audio.currentTime = expectedPosition;
            setCurrentTime(expectedPosition);
+           if (audio.playbackRate !== 1) audio.playbackRate = 1;
          }
       }
-    }, 2000);
+    }, 1000);
     
-    return () => window.clearInterval(syncInterval);
+    return () => {
+      window.clearInterval(syncInterval);
+      if (audioRef.current && audioRef.current.playbackRate !== 1) {
+        audioRef.current.playbackRate = 1;
+      }
+    };
   }, [isHost]);
 
   useEffect(() => {
@@ -2237,6 +2286,21 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
             onPlay={() => {
               setIsAudioPlaying(true);
               console.log('AUDIO PLAY', audioRef.current?.src);
+            }}
+            onPlaying={() => {
+              if (!isHost) {
+                const state = latestPlaybackStateRef.current;
+                if (state && state.is_playing && audioRef.current) {
+                  const expected = getExpectedPlaybackPosition(state);
+                  if (Number.isFinite(expected)) {
+                    const drift = Math.abs(expected - audioRef.current.currentTime);
+                    if (drift > 0.5) {
+                      console.log(`[SYNC] RECOVERED FROM BUFFERING, drift=${drift.toFixed(3)}s`);
+                      audioRef.current.currentTime = expected;
+                    }
+                  }
+                }
+              }
             }}
             onPause={() => {
               setIsAudioPlaying(false);
