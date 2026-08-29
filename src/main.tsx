@@ -54,6 +54,13 @@ type Member = {
   display_name: string;
 };
 
+type PresenceUser = {
+  user_id: string;
+  display_name: string;
+  joined_at: number;
+  is_host: boolean;
+};
+
 const authConfigError = 'Authentication is not configured for this deployment. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to the Vercel project environment.';
 const appBaseUrl = (import.meta.env.VITE_SITE_URL || import.meta.env.VITE_APP_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173')).replace(/\/$/, '');
 const googleAuthRedirectUrl = new URL('/auth/callback', `${appBaseUrl}/`).toString();
@@ -1096,6 +1103,10 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [showQr, setShowQr] = useState(false);
+  const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
+  const [volume, setVolume] = useState(0.8);
+  const [profileName, setProfileName] = useState('You');
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastSyncRef = useRef(0);
   const scheduledPlayTimeoutRef = useRef<number | null>(null);
@@ -1107,6 +1118,29 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
   const isHost = room?.host_id === userId;
   const currentItem = queue.find((item) => playback && item.media_id === playback.media_id) ?? queue[0] ?? null;
   const roomUrl = getRoomUrl(roomId);
+
+  const normalizePresenceUsers = (presenceState: Record<string, Array<Record<string, unknown>>> | undefined) => {
+    const entries = Object.values(presenceState ?? {}).flatMap((value) => value ?? []);
+    const deduped = new Map<string, PresenceUser>();
+
+    entries.forEach((entry) => {
+      const payload = entry as Partial<PresenceUser> & { user_id?: string; display_name?: string; joined_at?: number | string; is_host?: boolean };
+      const userId = payload.user_id;
+      if (!userId) return;
+
+      deduped.set(userId, {
+        user_id: userId,
+        display_name: String(payload.display_name || 'Guest'),
+        joined_at: Number(payload.joined_at ?? Date.now()),
+        is_host: Boolean(payload.is_host),
+      });
+    });
+
+    return [...deduped.values()].sort((a, b) => {
+      if (a.is_host !== b.is_host) return a.is_host ? -1 : 1;
+      return a.display_name.localeCompare(b.display_name);
+    });
+  };
 
   const copyText = async (text: string, successMessage: string) => {
     try {
@@ -1454,6 +1488,22 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
   }, [roomId, userId]);
 
   useEffect(() => {
+    if (!supabase) return;
+    void supabase.auth.getUser().then(({ data, error }) => {
+      if (!error && data.user) {
+        const nextName = data.user.user_metadata?.full_name || data.user.email || 'You';
+        setProfileName(nextName);
+      }
+    });
+  }, [userId]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume;
+    }
+  }, [volume]);
+
+  useEffect(() => {
     if (!supabase || !roomId) return;
     const client = supabase;
 
@@ -1461,6 +1511,15 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
     roomChannelRef.current = channel;
 
     channel
+      .on('presence', { event: 'sync' }, () => {
+        setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
+      })
+      .on('presence', { event: 'join' }, () => {
+        setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
+      })
+      .on('presence', { event: 'leave' }, () => {
+        setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
+      })
       .on('broadcast', { event: 'playback-command' }, (payload) => {
         const command = payload.payload as { command?: string; roomId?: string; position_ms?: number; timestamp_ms?: number; commandId?: string } | undefined;
         if (!command || command.roomId !== roomId) return;
@@ -1589,12 +1648,32 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_members', filter: `room_id=eq.${roomId}` }, () => {
         void loadRoomMembers(client);
       })
-      .subscribe();
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          setConnectionStatus('connected');
+          await channel.track({
+            user_id: userId,
+            display_name: profileName,
+            joined_at: Date.now(),
+            is_host: room?.host_id === userId,
+          });
+          setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
+        }
+
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setConnectionStatus('disconnected');
+        }
+
+        if (status === 'CLOSED') {
+          setConnectionStatus('reconnecting');
+        }
+      });
 
     return () => {
+      setPresenceUsers([]);
       void client.removeChannel(channel);
     };
-  }, [roomId]);
+  }, [roomId, userId, profileName, room?.host_id]);
 
   useEffect(() => {
     if (playback && currentItem && audioRef.current) {
@@ -2132,6 +2211,7 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
 
   const durationMs = audioDuration || (currentItem?.duration_ms ?? 0);
   const progress = (currentTime / Math.max(durationMs / 1000, 1)) * 100;
+  const listeningNow = presenceUsers.length || members.length || 1;
 
   return (
     <div className="room-content fade-in">
@@ -2140,8 +2220,8 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           <div className="breadcrumb"><span>ARXYN /</span> <span>{getDisplayRoomName(room)}</span></div>
           <h1>{room.name}</h1>
           <div className="room-meta">
-            <span className="room-state"><i />{members.length} connected</span>
-            <span><Users size={14} /> {room.max_participants} max</span>
+            <span className={`room-state ${connectionStatus === 'connected' ? 'online' : connectionStatus === 'reconnecting' ? 'reconnecting' : 'offline'}`}><i />{connectionStatus === 'connected' ? 'Connected' : connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Disconnected'}</span>
+            <span><Users size={14} /> {listeningNow} listening</span>
             <span className="code-box">{room.code}</span>
           </div>
         </div>
@@ -2153,6 +2233,26 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
           </button>
           {isHost && <button className="danger-button" onClick={() => void handleDeleteRoom()}>Delete Room</button>}
           <button className="secondary-button" onClick={() => setShowQr(true)}>Show QR</button>
+        </div>
+      </div>
+
+      <div className="presence-panel panel">
+        <div className="panel-head">
+          <h3>Listening now</h3>
+          <span className="presence-count">{listeningNow} online</span>
+        </div>
+        <div className="presence-list">
+          {presenceUsers.length ? presenceUsers.map((presenceUser) => (
+            <div key={presenceUser.user_id} className={`presence-item ${presenceUser.user_id === userId ? 'self' : ''}`}>
+              <span className="presence-dot" />
+              <div className="presence-meta">
+                <strong>{presenceUser.display_name}</strong>
+                <small>{presenceUser.is_host || presenceUser.user_id === room.host_id ? 'HOST' : 'LISTENING'}</small>
+              </div>
+            </div>
+          )) : (
+            <div className="empty-state compact"><p>No listeners connected yet.</p></div>
+          )}
         </div>
       </div>
 
@@ -2169,9 +2269,14 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
             <div>
               <p className="eyebrow">NOW PLAYING</p>
               <h2>{currentItem?.title || 'No song selected'}</h2>
-              <p className="muted">{currentItem?.artist || 'Awaiting the host to add tracks'}</p>
+              <p className="muted">{currentItem?.artist || 'Awaiting the host to add tracks'} · <span>{room.name}</span></p>
             </div>
             <button className="like-button" aria-label="Like song">?</button>
+          </div>
+
+          <div className="status-row">
+            <span className={`status-pill ${playback?.is_playing ? 'playing' : 'paused'}`}>{playback?.is_playing ? '🟢 Playing' : '⏸ Paused'}</span>
+            <span className="status-pill muted-pill">{isHost ? 'Host control' : 'Synchronized with Host'}</span>
           </div>
 
           <div className="progress-wrap">
@@ -2190,10 +2295,13 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
             <button className="icon-button small" aria-label="Next song" onClick={() => void handleAdjacentTrack(1)} disabled={!isHost || queue.length < 2}><SkipForward size={18} /></button>
           </div>
 
-          {autoplayBlocked && <button className="secondary-button full" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button>}
+          {!isHost && <div className="host-locked">Controlled by Host</div>}
 
           <div className="range-block">
-            <label htmlFor="seek-slider">Seek</label>
+            <div className="range-header">
+              <label htmlFor="seek-slider">Seek</label>
+              <span>{formatTime(currentTime * 1000)} / {formatTime(durationMs || 0)}</span>
+            </div>
             <input
               id="seek-slider"
               type="range"
@@ -2205,6 +2313,24 @@ function Room({ roomId, userId, notify, onRoomDeleted }: { roomId: string; userI
               disabled={!isHost}
             />
           </div>
+
+          <div className="volume-block">
+            <label htmlFor="volume-slider">Volume</label>
+            <div className="volume-row">
+              <input
+                id="volume-slider"
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={volume}
+                onChange={(event) => setVolume(Number(event.target.value))}
+              />
+              <span>{Math.round(volume * 100)}%</span>
+            </div>
+          </div>
+
+          {autoplayBlocked && <button className="secondary-button full" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button>}
 
           <audio
             ref={audioRef}
