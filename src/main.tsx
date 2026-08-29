@@ -1223,50 +1223,40 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     });
   };
 
-  const applyRemotePlaybackState = (state: PlaybackState) => {
+  const applyAuthoritativePlaybackState = (state: PlaybackState) => {
     latestPlaybackStateRef.current = state;
     const audio = audioRef.current;
+    
+    // We only control playback for members, not the host.
+    if (!audio || isHost) return;
 
     if (state.is_playing === false) {
-      console.log('AUTHORITATIVE PAUSE RECEIVED', state);
+      console.log(`[SYNC] MEMBER PAUSED sequence=${state.sequence_number}`);
       clearScheduledPlay();
-      if (audio) {
-        audio.pause();
-        audio.playbackRate = 1;
-        audio.currentTime = Number(state.position_ms ?? 0) / 1000;
-        setCurrentTime(audio.currentTime);
-        setIsAudioPlaying(false);
-        console.log('FOLLOWER PAUSE COMMAND RECEIVED', state);
-        console.log('AUDIO SUCCESSFULLY PAUSED', {
-          roomId,
-          media_id: state.media_id,
-          positionSeconds: audio.currentTime,
-          sequenceNumber: state.sequence_number,
-        });
-      }
-      return;
+      audio.pause();
+      audio.playbackRate = 1;
+      audio.currentTime = Number(state.position_ms ?? 0) / 1000;
+      setCurrentTime(audio.currentTime);
+      setIsAudioPlaying(false);
+      return; // TERMINAL PAUSE BRANCH. NEVER CALL PLAY() AFTER THIS.
     }
 
-    if (audio) {
-      const expectedPosition = getExpectedPlaybackPosition(state);
-      if (Number.isFinite(expectedPosition)) {
-        const drift = Math.abs(expectedPosition - audio.currentTime);
-        if (drift > 0.5) {
-          audio.currentTime = expectedPosition;
-          setCurrentTime(expectedPosition);
-        }
-      }
-      if (audio.paused) {
-        void audio.play().catch(() => {
-          setAutoplayBlocked(true);
-        });
+    // PLAYING BRANCH
+    console.log(`[SYNC] MEMBER PLAYED sequence=${state.sequence_number}`);
+    const expectedPosition = getExpectedPlaybackPosition(state);
+    if (Number.isFinite(expectedPosition)) {
+      const drift = Math.abs(expectedPosition - audio.currentTime);
+      if (drift > 0.5) {
+        audio.currentTime = expectedPosition;
+        setCurrentTime(expectedPosition);
       }
     }
-  };
-
-  const handleRemotePause = (state: PlaybackState) => {
-    console.log('REMOTE PAUSE RECEIVED', state);
-    applyRemotePlaybackState(state);
+    
+    if (audio.paused) {
+      void audio.play().catch(() => {
+        setAutoplayBlocked(true);
+      });
+    }
   };
 
   useEffect(() => {
@@ -1342,105 +1332,55 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
   const syncActiveSource = async () => {
     const audio = audioRef.current;
-    const currentPlayback = latestPlaybackStateRef.current ?? playback;
-    if (!audio || !currentItem || !currentPlayback || isHost) return;
+    if (!audio || !currentItem || isHost) return;
 
     const nextSource = getCurrentAudioUrl();
     if (!nextSource || nextSource.startsWith('blob:') || nextSource.startsWith('file:')) return;
+    
     if (audio.src !== nextSource) {
       audio.src = nextSource;
       audio.load();
       setCurrentTime(0);
       setAudioDuration(0);
-    }
-
-    if (!currentPlayback.is_playing) {
-      handleRemotePause(currentPlayback);
-      return;
-    }
-
-    const expectedPosition = getExpectedPlaybackPosition(currentPlayback);
-    if (!Number.isFinite(expectedPosition)) return;
-
-    const delta = Math.abs(audio.currentTime - expectedPosition);
-    if (delta > 0.5) {
-      audio.currentTime = expectedPosition;
-    }
-
-    try {
-      await waitForAudioReady(audio);
-      if (audio.paused) {
-        await audio.play();
+      
+      try {
+        await waitForAudioReady(audio);
+        const currentPlayback = latestPlaybackStateRef.current ?? playback;
+        if (currentPlayback) {
+          applyAuthoritativePlaybackState(currentPlayback);
+        }
+      } catch (err) {
+        console.error('AUDIO LOAD ERROR', err);
+        setAutoplayBlocked(true);
       }
-      setAutoplayBlocked(false);
-    } catch (playError) {
-      console.error('AUDIO PLAY ERROR', playError);
-      setAutoplayBlocked(true);
-      notify('Tap to Sync & Play');
     }
   };
 
+  // Strict drift correction interval (ONLY runs while playing)
   useEffect(() => {
-    if (!playback || !currentItem || isHost) return;
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    const latestState = latestPlaybackStateRef.current ?? playback;
-    if (!latestState || latestState.is_playing === false) {
-      if (audio && !audio.paused) {
-        audio.pause();
-      }
-      return;
-    }
-
-    const expectedPosition = getExpectedPlaybackPosition(latestState);
-    if (!Number.isFinite(expectedPosition)) return;
-
-    const drift = expectedPosition - audio.currentTime;
-    if (Math.abs(drift) > 0.5) {
-      audio.currentTime = expectedPosition;
-      setCurrentTime(expectedPosition);
-    }
-
-    if (audio.paused) {
-      void audio.play().catch(() => {
-        setAutoplayBlocked(true);
-      });
-    }
-  }, [currentItem, playback, isHost]);
-
-  useEffect(() => {
-    if (!playback || !currentItem || isHost) return;
-
+    if (isHost) return;
+    
     const syncInterval = window.setInterval(() => {
-      const state = latestPlaybackStateRef.current ?? playback;
+      const state = latestPlaybackStateRef.current;
+      // Do not run drift correction if paused or missing state.
+      // audio.play() and audio.pause() are strictly handled by applyAuthoritativePlaybackState.
+      if (!state || state.is_playing === false) return;
+      
       const audio = audioRef.current;
-      if (!audio) return;
-
-      if (!state || state.is_playing === false) {
-        if (audio && !audio.paused) {
-          audio.pause();
-        }
-        return;
-      }
-
+      if (!audio || audio.paused) return; // Wait for applyAuthoritativePlaybackState to play it first
+      
       const expectedPosition = getExpectedPlaybackPosition(state);
-      const drift = expectedPosition - audio.currentTime;
-
-      if (Math.abs(drift) > 0.5) {
-        audio.currentTime = expectedPosition;
-        setCurrentTime(expectedPosition);
+      if (Number.isFinite(expectedPosition)) {
+         const drift = Math.abs(expectedPosition - audio.currentTime);
+         if (drift > 0.5) {
+           audio.currentTime = expectedPosition;
+           setCurrentTime(expectedPosition);
+         }
       }
-
-      if (audio.paused) {
-        void audio.play().catch(() => {
-          setAutoplayBlocked(true);
-        });
-      }
-    }, 1200);
-
+    }, 2000);
+    
     return () => window.clearInterval(syncInterval);
-  }, [currentItem, playback, isHost]);
+  }, [isHost]);
 
   useEffect(() => {
     const loadRoom = async () => {
@@ -1565,15 +1505,15 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         const previousSequence = lastProcessedSequenceRef.current ?? -1;
 
         if (nextSequence <= previousSequence && previousSequence !== -1) {
-          console.log('IGNORED STALE BROADCAST UPDATE', { nextSequence, previousSequence, nextState });
+          console.log(`[SYNC] IGNORED STALE sequence=${nextSequence}`, { previousSequence, nextState });
           return;
         }
 
         lastProcessedSequenceRef.current = nextSequence;
         latestPlaybackStateRef.current = nextState;
-        console.log('FOLLOWER PLAYBACK STATE FROM BROADCAST', nextState);
-        applyRemotePlaybackState(nextState);
-        setPlayback(nextState);
+        console.log(`[SYNC] MEMBER RECEIVED state sequence=${nextSequence} playing=${nextState.is_playing}`);
+        applyAuthoritativePlaybackState(nextState);
+        if (!isHost) setPlayback(nextState);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, (payload) => {
         if (payload.eventType === 'DELETE') {
@@ -1588,51 +1528,38 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         setQueue((data ?? []) as QueueItem[]);
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'playback_state', filter: `room_id=eq.${roomId}` }, (payload) => {
-        console.log('REALTIME PLAYBACK EVENT:', payload);
         if (!payload.new) return;
         const nextState = payload.new as PlaybackState;
         const nextSequence = Number(nextState.sequence_number ?? -1);
         const previousSequence = lastProcessedSequenceRef.current ?? -1;
 
         if (nextSequence <= previousSequence) {
-          console.log('IGNORED STALE PLAYBACK UPDATE', { nextSequence, previousSequence, nextState });
+          console.log(`[SYNC] IGNORED STALE sequence=${nextSequence}`, { previousSequence, nextState });
           return;
         }
 
         lastProcessedSequenceRef.current = nextSequence;
         latestPlaybackStateRef.current = nextState;
-        console.log('FOLLOWER PLAYBACK STATE', nextState);
-        applyRemotePlaybackState(nextState);
-        setPlayback(nextState);
+        console.log(`[SYNC] MEMBER RECEIVED state sequence=${nextSequence} playing=${nextState.is_playing}`);
+        applyAuthoritativePlaybackState(nextState);
+        if (!isHost) setPlayback(nextState);
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'playback_state', filter: `room_id=eq.${roomId}` }, (payload) => {
-        console.log('REALTIME PLAYBACK EVENT:', payload);
         if (!payload.new) return;
         const nextState = payload.new as PlaybackState;
         const nextSequence = Number(nextState.sequence_number ?? -1);
         const previousSequence = lastProcessedSequenceRef.current ?? -1;
 
         if (nextSequence <= previousSequence) {
-          console.log('IGNORED STALE PLAYBACK UPDATE', { nextSequence, previousSequence, nextState });
+          console.log(`[SYNC] IGNORED STALE sequence=${nextSequence}`, { previousSequence, nextState });
           return;
         }
 
         lastProcessedSequenceRef.current = nextSequence;
         latestPlaybackStateRef.current = nextState;
-        console.log('FOLLOWER PLAYBACK STATE', nextState);
-
-        if (nextState.is_playing === false) {
-          console.log('FOLLOWER PAUSE COMMAND RECEIVED');
-          applyRemotePlaybackState(nextState);
-          setPlayback(nextState);
-          return;
-        }
-
-        if (isHost) {
-          return;
-        }
-
-        setPlayback(nextState);
+        console.log(`[SYNC] MEMBER RECEIVED state sequence=${nextSequence} playing=${nextState.is_playing}`);
+        applyAuthoritativePlaybackState(nextState);
+        if (!isHost) setPlayback(nextState);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_members', filter: `room_id=eq.${roomId}` }, () => {
         void loadRoomMembers(client);
@@ -1656,7 +1583,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
             if (nextSequence > previousSequence) {
               lastProcessedSequenceRef.current = nextSequence;
               latestPlaybackStateRef.current = nextState;
-              applyRemotePlaybackState(nextState);
+              applyAuthoritativePlaybackState(nextState);
               setPlayback(nextState);
             }
           }
@@ -1696,10 +1623,10 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   }, [profileName, room?.host_id, connectionStatus, userId]);
 
   useEffect(() => {
-    if (playback && currentItem && audioRef.current) {
-      syncActiveSource();
+    if (currentItem && audioRef.current && !isHost) {
+      void syncActiveSource();
     }
-  }, [currentItem, playback]);
+  }, [currentItem, isHost]);
 
   const handleAddSong = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -1958,6 +1885,12 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       sequence_number: nextSequence,
     };
 
+    if (command === 'PLAY' || (command === 'SYNC' && payload.is_playing)) {
+      console.log(`[SYNC] HOST PLAY sequence=${nextSequence}`);
+    } else if (command === 'PAUSE' || (command === 'SYNC' && !payload.is_playing)) {
+      console.log(`[SYNC] HOST PAUSE sequence=${nextSequence}`);
+    }
+
     // 1. Broadcast immediately for instant realtime sync across members
     void sendRealtimePlaybackCommand(command, payload as PlaybackState);
 
@@ -2055,7 +1988,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     clearScheduledPlay();
     const latestState = latestPlaybackStateRef.current ?? playback;
     if (!latestState.is_playing) {
-      handleRemotePause(latestState);
+      applyAuthoritativePlaybackState(latestState);
       return;
     }
 
