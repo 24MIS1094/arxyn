@@ -1366,12 +1366,22 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     
     const syncInterval = window.setInterval(() => {
       const state = latestPlaybackStateRef.current;
+      
+      // If host is paused, ensure we are paused
       if (!state || state.is_playing === false) {
+        if (!isHost && isAudioPlaying) {
+           setIsAudioPlaying(false);
+        }
         return;
       }
       
       const player = playerRef.current;
       if (!player) return;
+
+      // Force play if we should be playing but fell out of sync (e.g. after a buffer drop)
+      if (!isHost && !isAudioPlaying && !autoplayBlocked) {
+        setIsAudioPlaying(true);
+      }
       
       const expectedPosition = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
       if (Number.isFinite(expectedPosition)) {
@@ -2249,118 +2259,21 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       <div className="room-layout">
         <section className="player-panel">
           {currentItem?.source_type === 'youtube' ? (
-            <>
-              <div 
-                ref={playerWrapperRef} 
-                style={hasVideoAccess ? { 
-                  width: '100%', aspectRatio: '16/9', position: 'relative', overflow: 'hidden', borderRadius: isFullscreen ? 0 : 8, marginBottom: 24, backgroundColor: '#000' 
-                } : { 
-                  position: 'absolute', left: '-9999px', top: '-9999px', width: '250px', height: '250px', zIndex: -10
-                }}
-              >
-                {React.createElement(ReactPlayer as any, {
-                  ref: playerRef,
-                  url: getCurrentAudioUrl(),
-                  playing: isAudioPlaying,
-                  volume: volume,
-                  width: "100%",
-                  height: "100%",
-                  style: { position: 'absolute', top: 0, left: 0 },
-                  config: { youtube: { playerVars: { controls: 0, disablekb: 1, modestbranding: 1 } } },
-                  onProgress: handleProgress,
-                  onDuration: (dur: number) => setAudioDuration(dur * 1000),
-                  onPlay: () => {
-                    if (isHost) {
-                      setIsAudioPlaying(true);
-                    } else {
-                      const state = latestPlaybackStateRef.current;
-                      if (state?.is_playing) {
-                        setIsAudioPlaying(true);
-                      } else {
-                        console.warn('[SYNC] Browser resumed incorrectly. Forcing pause.');
-                        setIsAudioPlaying(false);
-                      }
-                    }
-                  },
-                  onPause: () => {
-                    if (isHost) {
-                      setIsAudioPlaying(false);
-                    } else {
-                      const state = latestPlaybackStateRef.current;
-                      if (state && state.is_playing) {
-                        console.warn('[SYNC] Browser paused unexpectedly (autoplay blocked or buffering).');
-                        setAutoplayBlocked(true);
-                        setIsAudioPlaying(false);
-                      } else {
-                        setIsAudioPlaying(false);
-                      }
-                    }
-                  },
-                  onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
-                  onBufferEnd: () => {
-                    if (!isHost && wasBufferingRef.current) {
-                      const state = latestPlaybackStateRef.current;
-                      if (state && state.is_playing && playerRef.current) {
-                        const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
-                        if (Number.isFinite(expected)) {
-                          const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
-                          if (drift > 0.5) {
-                            safeSeek(playerRef.current, expected);
-                            lastHardSeekRef.current = Date.now();
-                          }
-                        }
-                      }
-                      wasBufferingRef.current = false;
-                    }
-                  },
-                  onError: (e: any) => {
-                    console.error('PLAYER ERROR', e);
-                    setAutoplayBlocked(true);
-                  },
-                  onEnded: () => {
-                    setIsAudioPlaying(false);
-                    void handleAdjacentTrack(1);
-                  }
-                })}
-                {autoplayBlocked && hasVideoAccess && <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}><button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button></div>}
-                {isHost && (
-                  <button onClick={handleFullscreen} style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
-                    {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-                  </button>
-                )}
-              </div>
-              
-              {!hasVideoAccess && (
-                <div className="player-art-wrap">
-                  <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
-                  <div className="art-overlay">
-                    <span className="live-pill"><i /> LIVE</span>
-                    <span>{room.visibility}</span>
-                  </div>
-                  
-                  <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}>
-                    <button className="secondary-button" onClick={() => void handleRequestVideo()}>Request Video Access</button>
-                  </div>
-                  
-                  {autoplayBlocked && <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}><button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button></div>}
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="player-art-wrap">
-              <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
-              <div className="art-overlay">
-                <span className="live-pill"><i /> LIVE</span>
-                <span>{room.visibility}</span>
-              </div>
+            <div 
+              ref={playerWrapperRef} 
+              style={{ 
+                width: '100%', aspectRatio: '16/9', position: 'relative', overflow: 'hidden', borderRadius: isFullscreen ? 0 : 8, marginBottom: 24, backgroundColor: '#000' 
+              }}
+            >
               {React.createElement(ReactPlayer as any, {
                 ref: playerRef,
                 url: getCurrentAudioUrl(),
                 playing: isAudioPlaying,
                 volume: volume,
-                width: "0px",
-                height: "0px",
-                style: { display: 'none' },
+                width: "100%",
+                height: "100%",
+                style: { position: 'absolute', top: 0, left: 0 },
+                config: { youtube: { playerVars: { controls: 0, disablekb: 1, modestbranding: 1 } } },
                 onProgress: handleProgress,
                 onDuration: (dur: number) => setAudioDuration(dur * 1000),
                 onPlay: () => {
@@ -2379,13 +2292,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                   if (isHost) {
                     setIsAudioPlaying(false);
                   } else {
-                    const state = latestPlaybackStateRef.current;
-                    if (state && state.is_playing) {
-                      setAutoplayBlocked(true);
-                      setIsAudioPlaying(false);
-                    } else {
-                      setIsAudioPlaying(false);
-                    }
+                    setIsAudioPlaying(false);
                   }
                 },
                 onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
@@ -2406,6 +2313,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                   }
                 },
                 onError: (e: any) => {
+                  console.error('PLAYER ERROR', e);
                   setAutoplayBlocked(true);
                 },
                 onEnded: () => {
@@ -2413,7 +2321,43 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                   void handleAdjacentTrack(1);
                 }
               })}
-              {autoplayBlocked && <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}><button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button></div>}
+
+              {/* ARTWORK OVERLAY (Hides video when permission is false) */}
+              {!hasVideoAccess && (
+                <div className="player-art-wrap" style={{ position: 'absolute', inset: 0, zIndex: 5, margin: 0, borderRadius: 0 }}>
+                  <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
+                  <div className="art-overlay">
+                    <span className="live-pill"><i /> LIVE</span>
+                    <span>{room.visibility}</span>
+                  </div>
+                  
+                  <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}>
+                    <button className="secondary-button" onClick={() => void handleRequestVideo()}>Request Video Access</button>
+                  </div>
+                </div>
+              )}
+
+              {/* AUTOPLAY BLOCKED OVERLAY */}
+              {autoplayBlocked && (
+                <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.8)', zIndex: 20}}>
+                  <button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button>
+                </div>
+              )}
+
+              {/* HOST FULLSCREEN */}
+              {isHost && hasVideoAccess && (
+                <button onClick={handleFullscreen} style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
+                  {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="player-art-wrap">
+              <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
+              <div className="art-overlay">
+                <span className="live-pill"><i /> LIVE</span>
+                <span>{room.visibility}</span>
+              </div>
             </div>
           )}
 
@@ -2430,45 +2374,46 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
             <span className="status-pill">{isHost ? 'Host control' : 'Synchronized with Host'}</span>
           </div>
 
-          {isHost ? (
-            <div className="player-controls">
-              <button className="icon-button" aria-label="Previous song" onClick={() => void handleAdjacentTrack(-1)} disabled={queue.length < 2}><SkipBack size={24} fill="currentColor" /></button>
-              <button className="play-button" aria-label={isAudioPlaying ? 'Pause' : 'Play'} onClick={() => void handlePlayPause()} disabled={!currentItem}>
-                {isAudioPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" style={{marginLeft:4}} />}
-              </button>
-              <button className="icon-button" aria-label="Next song" onClick={() => void handleAdjacentTrack(1)} disabled={queue.length < 2}><SkipForward size={24} fill="currentColor" /></button>
-            </div>
-          ) : (
-            <div className="host-locked-pill" style={{ marginBottom: 24 }}><Users size={16} /> Controlled by Host</div>
-          )}
-
-          <div className="progress-wrap">
-            <div className="progress-bar-bg">
-              <div className="progress-bar-fill" style={{ width: `${Math.min(Math.max(progress, 0), 100)}%` }} />
-            </div>
-            <div className="progress-times">
-              <span>{formatTime(currentTime * 1000)}</span>
-              <span>{formatTime(durationMs || 0)}</span>
-            </div>
-          </div>
-
-          {isHost && (
-            <div className="range-block">
-              <div className="range-header">
-                <label htmlFor="seek-slider">Seek</label>
-                <span>{formatTime(currentTime * 1000)} / {formatTime(durationMs || 0)}</span>
+          {/* UNIFIED PLAYBACK CONTROLS */}
+          <div className="unified-controls" style={{ background: 'rgba(255,255,255,0.02)', padding: 16, borderRadius: 12, marginBottom: 24, border: '1px solid rgba(255,255,255,0.05)' }}>
+            
+            {/* Seek / Progress Timeline */}
+            <div className="progress-wrap" style={{ marginBottom: 16 }}>
+              {isHost ? (
+                <input
+                  id="seek-slider"
+                  type="range"
+                  min={0}
+                  max={Math.max((durationMs || 1000) / 1000, 1)}
+                  step={0.1}
+                  value={currentTime}
+                  onChange={(event) => void handleSeek(Number(event.target.value))}
+                  style={{ width: '100%', marginBottom: 8 }}
+                />
+              ) : (
+                <div className="progress-bar-bg" style={{ marginBottom: 8 }}>
+                  <div className="progress-bar-fill" style={{ width: `${Math.min(Math.max(progress, 0), 100)}%` }} />
+                </div>
+              )}
+              <div className="progress-times" style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                <span>{formatTime(currentTime * 1000)}</span>
+                <span>{formatTime(durationMs || 0)}</span>
               </div>
-              <input
-                id="seek-slider"
-                type="range"
-                min={0}
-                max={Math.max(durationMs / 1000, 1)}
-                step={0.1}
-                value={currentTime}
-                onChange={(event) => void handleSeek(Number(event.target.value))}
-              />
             </div>
-          )}
+
+            {/* Playback Buttons */}
+            {isHost ? (
+              <div className="player-controls" style={{ margin: 0 }}>
+                <button className="icon-button" aria-label="Previous song" onClick={() => void handleAdjacentTrack(-1)} disabled={queue.length < 2}><SkipBack size={24} fill="currentColor" /></button>
+                <button className="play-button" aria-label={isAudioPlaying ? 'Pause' : 'Play'} onClick={() => void handlePlayPause()} disabled={!currentItem}>
+                  {isAudioPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" style={{marginLeft:4}} />}
+                </button>
+                <button className="icon-button" aria-label="Next song" onClick={() => void handleAdjacentTrack(1)} disabled={queue.length < 2}><SkipForward size={24} fill="currentColor" /></button>
+              </div>
+            ) : (
+              <div className="host-locked-pill" style={{ margin: '0 auto' }}><Users size={16} /> Controlled by Host</div>
+            )}
+          </div>
 
           <div className="volume-block">
             <label htmlFor="volume-slider">Volume</label>
