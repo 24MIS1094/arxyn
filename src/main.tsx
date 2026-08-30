@@ -1915,7 +1915,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const updatePlayback = async (nextState: Partial<PlaybackState>, command: 'PLAY' | 'PAUSE' | 'SEEK' | 'SONG_CHANGE' | 'SYNC' = 'SYNC') => {
     if (!supabase || !roomId || !isHost) return;
     const now = new Date().toISOString();
-    const current = playback ?? {
+    const current = latestPlaybackStateRef.current ?? playback ?? {
       room_id: roomId,
       media_id: currentItem?.media_id ?? null,
       title: currentItem?.title ?? null,
