@@ -628,7 +628,8 @@ function Shell({
           </div>
           <div className="top-actions">
             <button className="icon-button small" onClick={() => setDark(!dark)} aria-label="Toggle theme">✨</button>
-            <div className="avatar tiny avatar-ra">{name[0]?.toUpperCase() || 'A'}</div>
+            <button className="icon-button small" onClick={logout} title="Sign out"><LogOut size={14} /></button>
+            <div className="avatar tiny avatar-ra" onClick={() => setView('profile')} style={{ cursor: 'pointer' }}>{name[0]?.toUpperCase() || 'A'}</div>
           </div>
         </header>
 
@@ -2230,79 +2231,104 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
       <div className="room-layout">
         <section className="player-panel">
-          {currentItem?.source_type === 'youtube' && hasVideoAccess ? (
-            <div ref={playerWrapperRef} style={{ width: '100%', aspectRatio: '16/9', position: 'relative', overflow: 'hidden', borderRadius: isFullscreen ? 0 : 8, marginBottom: 24, backgroundColor: '#000' }}>
-              {React.createElement(ReactPlayer as any, {
-                ref: playerRef,
-                url: getCurrentAudioUrl(),
-                playing: isAudioPlaying,
-                volume: volume,
-                width: "100%",
-                height: "100%",
-                style: { position: 'absolute', top: 0, left: 0 },
-                config: { youtube: { playerVars: { controls: 0, disablekb: 1, modestbranding: 1 } } },
-                onProgress: handleProgress,
-                onDuration: (dur: number) => setAudioDuration(dur * 1000),
-                onPlay: () => {
-                  if (isHost) {
-                    setIsAudioPlaying(true);
-                  } else {
-                    const state = latestPlaybackStateRef.current;
-                    if (state?.is_playing) {
+          {currentItem?.source_type === 'youtube' ? (
+            <>
+              <div 
+                ref={playerWrapperRef} 
+                style={hasVideoAccess ? { 
+                  width: '100%', aspectRatio: '16/9', position: 'relative', overflow: 'hidden', borderRadius: isFullscreen ? 0 : 8, marginBottom: 24, backgroundColor: '#000' 
+                } : { 
+                  position: 'absolute', opacity: 0.01, pointerEvents: 'none', zIndex: -10, width: '10px', height: '10px'
+                }}
+              >
+                {React.createElement(ReactPlayer as any, {
+                  ref: playerRef,
+                  url: getCurrentAudioUrl(),
+                  playing: isAudioPlaying,
+                  volume: volume,
+                  width: "100%",
+                  height: "100%",
+                  style: { position: 'absolute', top: 0, left: 0 },
+                  config: { youtube: { playerVars: { controls: 0, disablekb: 1, modestbranding: 1 } } },
+                  onProgress: handleProgress,
+                  onDuration: (dur: number) => setAudioDuration(dur * 1000),
+                  onPlay: () => {
+                    if (isHost) {
                       setIsAudioPlaying(true);
                     } else {
-                      console.warn('[SYNC] Browser resumed incorrectly. Forcing pause.');
-                      setIsAudioPlaying(false);
-                    }
-                  }
-                },
-                onPause: () => {
-                  if (isHost) {
-                    setIsAudioPlaying(false);
-                  } else {
-                    const state = latestPlaybackStateRef.current;
-                    if (state && state.is_playing) {
-                      console.warn('[SYNC] Browser paused unexpectedly (autoplay blocked or buffering).');
-                      setAutoplayBlocked(true);
-                      setIsAudioPlaying(false);
-                    } else {
-                      setIsAudioPlaying(false);
-                    }
-                  }
-                },
-                onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
-                onBufferEnd: () => {
-                  if (!isHost && wasBufferingRef.current) {
-                    const state = latestPlaybackStateRef.current;
-                    if (state && state.is_playing && playerRef.current) {
-                      const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
-                      if (Number.isFinite(expected)) {
-                        const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
-                        if (drift > 0.5) {
-                          safeSeek(playerRef.current, expected);
-                          lastHardSeekRef.current = Date.now();
-                        }
+                      const state = latestPlaybackStateRef.current;
+                      if (state?.is_playing) {
+                        setIsAudioPlaying(true);
+                      } else {
+                        console.warn('[SYNC] Browser resumed incorrectly. Forcing pause.');
+                        setIsAudioPlaying(false);
                       }
                     }
-                    wasBufferingRef.current = false;
+                  },
+                  onPause: () => {
+                    if (isHost) {
+                      setIsAudioPlaying(false);
+                    } else {
+                      const state = latestPlaybackStateRef.current;
+                      if (state && state.is_playing) {
+                        console.warn('[SYNC] Browser paused unexpectedly (autoplay blocked or buffering).');
+                        setAutoplayBlocked(true);
+                        setIsAudioPlaying(false);
+                      } else {
+                        setIsAudioPlaying(false);
+                      }
+                    }
+                  },
+                  onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
+                  onBufferEnd: () => {
+                    if (!isHost && wasBufferingRef.current) {
+                      const state = latestPlaybackStateRef.current;
+                      if (state && state.is_playing && playerRef.current) {
+                        const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
+                        if (Number.isFinite(expected)) {
+                          const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
+                          if (drift > 0.5) {
+                            safeSeek(playerRef.current, expected);
+                            lastHardSeekRef.current = Date.now();
+                          }
+                        }
+                      }
+                      wasBufferingRef.current = false;
+                    }
+                  },
+                  onError: (e: any) => {
+                    console.error('PLAYER ERROR', e);
+                    setAutoplayBlocked(true);
+                  },
+                  onEnded: () => {
+                    setIsAudioPlaying(false);
+                    void handleAdjacentTrack(1);
                   }
-                },
-                onError: (e: any) => {
-                  console.error('PLAYER ERROR', e);
-                  setAutoplayBlocked(true);
-                },
-                onEnded: () => {
-                  setIsAudioPlaying(false);
-                  void handleAdjacentTrack(1);
-                }
-              })}
-              {autoplayBlocked && <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}><button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button></div>}
-              {isHost && (
-                <button onClick={handleFullscreen} style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
-                  {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-                </button>
+                })}
+                {autoplayBlocked && hasVideoAccess && <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}><button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button></div>}
+                {isHost && (
+                  <button onClick={handleFullscreen} style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
+                    {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                  </button>
+                )}
+              </div>
+              
+              {!hasVideoAccess && (
+                <div className="player-art-wrap">
+                  <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
+                  <div className="art-overlay">
+                    <span className="live-pill"><i /> LIVE</span>
+                    <span>{room.visibility}</span>
+                  </div>
+                  
+                  <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}>
+                    <button className="secondary-button" onClick={() => void handleRequestVideo()}>Request Video Access</button>
+                  </div>
+                  
+                  {autoplayBlocked && <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}><button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button></div>}
+                </div>
               )}
-            </div>
+            </>
           ) : (
             <div className="player-art-wrap">
               <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
@@ -2310,13 +2336,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 <span className="live-pill"><i /> LIVE</span>
                 <span>{room.visibility}</span>
               </div>
-              
-              {!hasVideoAccess && currentItem?.source_type === 'youtube' && (
-                <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}>
-                  <button className="secondary-button" onClick={() => void handleRequestVideo()}>Request Video Access</button>
-                </div>
-              )}
-
               {React.createElement(ReactPlayer as any, {
                 ref: playerRef,
                 url: getCurrentAudioUrl(),
