@@ -721,6 +721,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 16px
   .player-art-wrap { margin-bottom: 24px; }
   .track-info-large h2 { font-size: 1.5rem; }
   .play-button { width: 64px; height: 64px; }
+  .queue-panel { padding: 16px; margin-top: 24px; }
 }
 
 .empty-state { text-align: center; padding: 48px 24px; color: var(--text-secondary); background: var(--bg-secondary); border-radius: var(--radius-lg); border: 1px dashed var(--border-light); }

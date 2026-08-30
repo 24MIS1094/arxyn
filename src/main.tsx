@@ -53,6 +53,7 @@ type Member = {
   role: string | null;
   joined_at: string;
   display_name: string;
+  video_access?: boolean;
 };
 
 type PresenceUser = {
@@ -1144,6 +1145,8 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
   const [volume, setVolume] = useState(0.8);
   const [profileName, setProfileName] = useState('You');
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const playerWrapperRef = useRef<HTMLDivElement>(null);
   const currentItemRef = useRef<QueueItem | null>(null);
   const isTransitioningRef = useRef(false);
   const localStateReceiveTimeRef = useRef<number>(0);
@@ -1345,6 +1348,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         role: member.role,
         joined_at: member.joined_at,
         display_name: profileMap.get(member.user_id)?.name || profileMap.get(member.user_id)?.email || 'User',
+        video_access: member.video_access ?? false,
       })));
     } catch (memberLoadError) {
       console.error('Optional room member loading failed:', memberLoadError);
@@ -1383,7 +1387,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
            }
          }
       }
-    }, 1000);
+    }, 500);
     
     return () => window.clearInterval(syncInterval);
   }, [isHost]);
@@ -1481,6 +1485,8 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
 
 
+  const [videoRequests, setVideoRequests] = useState<{userId: string, name: string}[]>([]);
+
   useEffect(() => {
     if (!supabase || !roomId) return;
     const client = supabase;
@@ -1491,6 +1497,13 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     channel
       .on('presence', { event: 'sync' }, () => {
         setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
+      })
+      .on('broadcast', { event: 'request-video' }, (payload) => {
+        const data = payload.payload as { userId: string; name: string };
+        setVideoRequests(prev => {
+          if (prev.find(r => r.userId === data.userId)) return prev;
+          return [...prev, data];
+        });
       })
       .on('presence', { event: 'join' }, () => {
         setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
@@ -2120,6 +2133,45 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     }
   };
 
+  const handleRequestVideo = async () => {
+    if (!roomChannelRef.current) return;
+    await roomChannelRef.current.send({
+      type: 'broadcast',
+      event: 'request-video',
+      payload: { userId, name: profileName }
+    });
+    notify('Video access request sent to host.');
+  };
+
+  const handleApproveVideo = async (targetUserId: string) => {
+    if (!supabase || !isHost) return;
+    const { error } = await supabase.from('room_members').update({ video_access: true }).eq('room_id', roomId).eq('user_id', targetUserId);
+    if (!error) {
+      setVideoRequests(prev => prev.filter(r => r.userId !== targetUserId));
+    }
+  };
+
+  const handleDeclineVideo = (targetUserId: string) => {
+    setVideoRequests(prev => prev.filter(r => r.userId !== targetUserId));
+  };
+
+  const handleFullscreen = () => {
+    if (!playerWrapperRef.current) return;
+    if (!document.fullscreenElement) {
+      void playerWrapperRef.current.requestFullscreen();
+    } else {
+      void document.exitFullscreen();
+    }
+  };
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
   if (error) {
     return <div className="content"><div className="empty-state"><Radio size={26} /><h3>Room unavailable</h3><p>{error}</p></div></div>;
   }
@@ -2131,6 +2183,9 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const durationMs = audioDuration || (currentItem?.duration_ms ?? 0);
   const progress = (currentTime / Math.max(durationMs / 1000, 1)) * 100;
   const listeningNow = connectedListeners.length;
+  
+  const currentUserMember = members.find(m => m.user_id === userId);
+  const hasVideoAccess = isHost || (currentUserMember?.video_access === true);
 
   return (
     <>
@@ -2159,10 +2214,24 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         )}
       </div>
 
+      {isHost && videoRequests.length > 0 && (
+        <div style={{ marginBottom: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {videoRequests.map((req) => (
+            <div key={req.userId} style={{ background: 'rgba(255,255,255,0.1)', padding: 15, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontWeight: 500, color: 'white' }}>{req.name} wants to watch the video</span>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button className="primary-button" onClick={() => void handleApproveVideo(req.userId)}>Approve</button>
+                <button className="secondary-button" onClick={() => handleDeclineVideo(req.userId)}>Decline</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="room-layout">
         <section className="player-panel">
-          {currentItem?.source_type === 'youtube' ? (
-            <div style={{ width: '100%', aspectRatio: '16/9', position: 'relative', overflow: 'hidden', borderRadius: 8, marginBottom: 24, backgroundColor: '#000' }}>
+          {currentItem?.source_type === 'youtube' && hasVideoAccess ? (
+            <div ref={playerWrapperRef} style={{ width: '100%', aspectRatio: '16/9', position: 'relative', overflow: 'hidden', borderRadius: isFullscreen ? 0 : 8, marginBottom: 24, backgroundColor: '#000' }}>
               {React.createElement(ReactPlayer as any, {
                 ref: playerRef,
                 url: getCurrentAudioUrl(),
@@ -2228,6 +2297,11 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 }
               })}
               {autoplayBlocked && <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}><button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button></div>}
+              {isHost && (
+                <button onClick={handleFullscreen} style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
+                  {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                </button>
+              )}
             </div>
           ) : (
             <div className="player-art-wrap">
@@ -2236,6 +2310,13 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 <span className="live-pill"><i /> LIVE</span>
                 <span>{room.visibility}</span>
               </div>
+              
+              {!hasVideoAccess && currentItem?.source_type === 'youtube' && (
+                <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}>
+                  <button className="secondary-button" onClick={() => void handleRequestVideo()}>Request Video Access</button>
+                </div>
+              )}
+
               {React.createElement(ReactPlayer as any, {
                 ref: playerRef,
                 url: getCurrentAudioUrl(),
