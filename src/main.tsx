@@ -53,7 +53,6 @@ type Member = {
   role: string | null;
   joined_at: string;
   display_name: string;
-  video_access?: boolean;
 };
 
 type PresenceUser = {
@@ -1352,7 +1351,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         role: member.role,
         joined_at: member.joined_at,
         display_name: profileMap.get(member.user_id)?.name || profileMap.get(member.user_id)?.email || 'User',
-        video_access: member.video_access ?? false,
       })));
     } catch (memberLoadError) {
       console.error('Optional room member loading failed:', memberLoadError);
@@ -1498,9 +1496,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   }, [userId]);
 
 
-
-  const [videoRequests, setVideoRequests] = useState<{userId: string, name: string}[]>([]);
-
   useEffect(() => {
     if (!supabase || !roomId) return;
     const client = supabase;
@@ -1511,17 +1506,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     channel
       .on('presence', { event: 'sync' }, () => {
         setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
-      })
-      .on('broadcast', { event: 'request-video' }, (payload) => {
-        const data = payload.payload as { userId: string; name: string };
-        setVideoRequests(prev => {
-          if (prev.find(r => r.userId === data.userId)) return prev;
-          return [...prev, data];
-        });
-      })
-      .on('broadcast', { event: 'approve-video' }, (payload) => {
-        const data = payload.payload as { userId: string };
-        setMembers(prev => prev.map(m => m.user_id === data.userId ? { ...m, video_access: true } : m));
       })
       .on('presence', { event: 'join' }, () => {
         setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
@@ -2059,22 +2043,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     }
   };
 
-  const handleSyncAndPlay = async () => {
-    if (!playerRef.current || !playback || !currentItem) return;
 
-    clearScheduledPlay();
-    const latestState = latestPlaybackStateRef.current ?? playback;
-    
-    if (!latestState.is_playing) {
-      applyAuthoritativePlaybackState(latestState);
-      return;
-    }
-
-    const expectedPosition = getExpectedPlaybackPosition(latestState);
-    safeSeek(playerRef.current, expectedPosition);
-    setIsAudioPlaying(true);
-    setAutoplayBlocked(false);
-  };
 
   const handleSelectTrack = async (item: QueueItem) => {
     if (!isHost) return;
@@ -2151,37 +2120,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     }
   };
 
-  const handleRequestVideo = async () => {
-    if (!roomChannelRef.current) return;
-    await roomChannelRef.current.send({
-      type: 'broadcast',
-      event: 'request-video',
-      payload: { userId, name: profileName }
-    });
-    notify('Video access request sent to host.');
-  };
-
-  const handleApproveVideo = async (targetUserId: string) => {
-    if (!isHost) return;
-    
-    // Broadcast instantly to guarantee immediate UI update for friend
-    roomChannelRef.current?.send({
-      type: 'broadcast',
-      event: 'approve-video',
-      payload: { userId: targetUserId }
-    });
-    
-    setVideoRequests(prev => prev.filter(r => r.userId !== targetUserId));
-    
-    // Also try to persist to DB
-    if (supabase) {
-      await supabase.from('room_members').update({ video_access: true }).eq('room_id', roomId).eq('user_id', targetUserId);
-    }
-  };
-
-  const handleDeclineVideo = (targetUserId: string) => {
-    setVideoRequests(prev => prev.filter(r => r.userId !== targetUserId));
-  };
 
   const handleFullscreen = () => {
     if (!playerWrapperRef.current) return;
@@ -2213,7 +2151,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const listeningNow = connectedListeners.length;
   
   const currentUserMember = members.find(m => m.user_id === userId);
-  const hasVideoAccess = isHost || (currentUserMember?.video_access === true);
 
   return (
     <>
@@ -2242,20 +2179,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         )}
       </div>
 
-      {isHost && videoRequests.length > 0 && (
-        <div style={{ marginBottom: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {videoRequests.map((req) => (
-            <div key={req.userId} style={{ background: 'rgba(255,255,255,0.1)', padding: 15, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontWeight: 500, color: 'white' }}>{req.name} wants to watch the video</span>
-              <div style={{ display: 'flex', gap: 10 }}>
-                <button className="primary-button" onClick={() => void handleApproveVideo(req.userId)}>Approve</button>
-                <button className="secondary-button" onClick={() => handleDeclineVideo(req.userId)}>Decline</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
       <div className="room-layout">
         <section className="player-panel">
           {currentItem?.source_type === 'youtube' ? (
@@ -2277,6 +2200,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 onProgress: handleProgress,
                 onDuration: (dur: number) => setAudioDuration(dur * 1000),
                 onPlay: () => {
+                  setAutoplayBlocked(false);
                   if (isHost) {
                     setIsAudioPlaying(true);
                   } else {
@@ -2321,43 +2245,76 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                   void handleAdjacentTrack(1);
                 }
               })}
-
-              {/* ARTWORK OVERLAY (Hides video when permission is false) */}
-              {!hasVideoAccess && (
-                <div className="player-art-wrap" style={{ position: 'absolute', inset: 0, zIndex: 5, margin: 0, borderRadius: 0 }}>
-                  <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
-                  <div className="art-overlay">
-                    <span className="live-pill"><i /> LIVE</span>
-                    <span>{room.visibility}</span>
-                  </div>
-                  
-                  <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}>
-                    <button className="secondary-button" onClick={() => void handleRequestVideo()}>Request Video Access</button>
-                  </div>
-                </div>
-              )}
-
-              {/* AUTOPLAY BLOCKED OVERLAY */}
-              {autoplayBlocked && (
-                <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.8)', zIndex: 20}}>
-                  <button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button>
-                </div>
-              )}
-
               {/* HOST FULLSCREEN */}
-              {isHost && hasVideoAccess && (
+              {isHost && (
                 <button onClick={handleFullscreen} style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
                   {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
                 </button>
               )}
             </div>
           ) : (
-            <div className="player-art-wrap">
+            <div className="player-art-wrap" style={{ position: 'relative' }}>
               <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
               <div className="art-overlay">
                 <span className="live-pill"><i /> LIVE</span>
                 <span>{room.visibility}</span>
               </div>
+              {React.createElement(ReactPlayer as any, {
+                ref: playerRef,
+                url: getCurrentAudioUrl(),
+                playing: isAudioPlaying,
+                volume: volume,
+                width: "100%",
+                height: "100%",
+                style: { position: 'absolute', top: 0, left: 0, opacity: 0, pointerEvents: 'none' },
+                onProgress: handleProgress,
+                onDuration: (dur: number) => setAudioDuration(dur * 1000),
+                onPlay: () => {
+                  setAutoplayBlocked(false);
+                  if (isHost) {
+                    setIsAudioPlaying(true);
+                  } else {
+                    const state = latestPlaybackStateRef.current;
+                    if (state?.is_playing) {
+                      setIsAudioPlaying(true);
+                    } else {
+                      setIsAudioPlaying(false);
+                    }
+                  }
+                },
+                onPause: () => {
+                  if (isHost) {
+                    setIsAudioPlaying(false);
+                  } else {
+                    setIsAudioPlaying(false);
+                  }
+                },
+                onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
+                onBufferEnd: () => {
+                  if (!isHost && wasBufferingRef.current) {
+                    const state = latestPlaybackStateRef.current;
+                    if (state && state.is_playing && playerRef.current) {
+                      const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
+                      if (Number.isFinite(expected)) {
+                        const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
+                        if (drift > 0.5) {
+                          safeSeek(playerRef.current, expected);
+                          lastHardSeekRef.current = Date.now();
+                        }
+                      }
+                    }
+                    wasBufferingRef.current = false;
+                  }
+                },
+                onError: (e: any) => {
+                  console.error('PLAYER ERROR', e);
+                  setAutoplayBlocked(true);
+                },
+                onEnded: () => {
+                  setIsAudioPlaying(false);
+                  void handleAdjacentTrack(1);
+                }
+              })}
             </div>
           )}
 
