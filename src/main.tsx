@@ -1158,7 +1158,25 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const lastSyncRef = useRef(0);
 
   const isHost = room?.host_id === userId;
-  const currentItem = queue.find((item) => playback && item.media_id === playback.media_id) ?? queue[0] ?? null;
+  const currentItem = React.useMemo(() => {
+    if (playback?.media_id) {
+       const found = queue.find(item => item.media_id === playback.media_id);
+       if (found) return found;
+       return {
+         id: 'temp-' + playback.media_id,
+         room_id: playback.room_id,
+         media_id: playback.media_id,
+         title: playback.title || 'Unknown',
+         artist: playback.artist || 'Unknown',
+         artwork_url: playback.artwork_url || null,
+         position: 0,
+         duration_ms: null,
+         source_type: playback.media_id.startsWith('http') ? 'youtube' : 'upload',
+         created_at: new Date().toISOString()
+       } as QueueItem;
+    }
+    return queue[0] ?? null;
+  }, [queue, playback]);
   const roomUrl = getRoomUrl(roomId);
   const connectedListeners = presenceUsers.filter((presenceUser) => presenceUser.user_id !== room?.host_id);
   const visibleMembers = connectedListeners.length
@@ -1256,41 +1274,47 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
   const applyAuthoritativePlaybackState = (state: PlaybackState) => {
     latestPlaybackStateRef.current = state;
-    const player = playerRef.current;
     
     // We only control playback for members, not the host.
-    if (!player || isHost) return;
+    if (isHost) return;
 
     if (state.is_playing === false) {
       console.log(`[SYNC] MEMBER PAUSED sequence=${state.sequence_number}`);
       clearScheduledPlay();
       setIsAudioPlaying(false);
-      const position = Number(state.position_ms ?? 0) / 1000;
-      safeSeek(player, position);
-      setCurrentTime(position);
+      
+      const player = playerRef.current;
+      if (player) {
+        const position = Number(state.position_ms ?? 0) / 1000;
+        safeSeek(player, position);
+        setCurrentTime(position);
+      }
       return;
     }
 
     // PLAYING BRANCH
     console.log(`[SYNC] MEMBER RECEIVED PLAY sequence=${state.sequence_number}`);
     
-    const expectedPosition = getExpectedPlaybackPosition(latestPlaybackStateRef.current ?? state, localStateReceiveTimeRef.current || undefined);
-    if (Number.isFinite(expectedPosition)) {
-      const currentPos = safeGetCurrentTime(player) || 0;
-      console.log(`[SYNC] EXPECTED POSITION: ${expectedPosition.toFixed(3)}s, ACTUAL POSITION: ${currentPos.toFixed(3)}s`);
-      const drift = Math.abs(expectedPosition - currentPos);
-      if (drift > 0.5) {
-        console.log(`[SYNC] HARD SEEK position=${expectedPosition.toFixed(3)}`);
-        safeSeek(player, expectedPosition);
-        setCurrentTime(expectedPosition);
-        lastHardSeekRef.current = Date.now();
-      }
-    }
-    
     setIsAudioPlaying(true);
     console.log('[SYNC] AUDIO PLAYING');
     setAutoplayBlocked(false);
     wasBufferingRef.current = false;
+
+    const player = playerRef.current;
+    if (player) {
+      const expectedPosition = getExpectedPlaybackPosition(latestPlaybackStateRef.current ?? state, localStateReceiveTimeRef.current || undefined);
+      if (Number.isFinite(expectedPosition)) {
+        const currentPos = safeGetCurrentTime(player) || 0;
+        console.log(`[SYNC] EXPECTED POSITION: ${expectedPosition.toFixed(3)}s, ACTUAL POSITION: ${currentPos.toFixed(3)}s`);
+        const drift = Math.abs(expectedPosition - currentPos);
+        if (drift > 0.5) {
+          console.log(`[SYNC] HARD SEEK position=${expectedPosition.toFixed(3)}`);
+          safeSeek(player, expectedPosition);
+          setCurrentTime(expectedPosition);
+          lastHardSeekRef.current = Date.now();
+        }
+      }
+    }
   };
 
   useEffect(() => {
@@ -2227,7 +2251,20 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
             onProgress: handleProgress,
             onDuration: (dur: number) => setAudioDuration(dur * 1000),
             onPlay: () => setIsAudioPlaying(true),
-            onPause: () => setIsAudioPlaying(false),
+            onPause: () => {
+              if (isHost) {
+                setIsAudioPlaying(false);
+              } else {
+                const state = latestPlaybackStateRef.current;
+                if (state && state.is_playing) {
+                  console.warn('[SYNC] Browser paused unexpectedly (autoplay blocked or buffering).');
+                  setAutoplayBlocked(true);
+                  setIsAudioPlaying(false);
+                } else {
+                  setIsAudioPlaying(false);
+                }
+              }
+            },
             onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
             onBufferEnd: () => {
               if (!isHost && wasBufferingRef.current) {
