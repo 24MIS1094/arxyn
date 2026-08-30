@@ -2161,13 +2161,144 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
       <div className="room-layout">
         <section className="player-panel">
-          <div className="player-art-wrap">
-            <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
-            <div className="art-overlay">
-              <span className="live-pill"><i /> LIVE</span>
-              <span>{room.visibility}</span>
+          {currentItem?.source_type === 'youtube' ? (
+            <div style={{ width: '100%', aspectRatio: '16/9', position: 'relative', overflow: 'hidden', borderRadius: 8, marginBottom: 24, backgroundColor: '#000' }}>
+              {React.createElement(ReactPlayer as any, {
+                ref: playerRef,
+                url: getCurrentAudioUrl(),
+                playing: isAudioPlaying,
+                volume: volume,
+                width: "100%",
+                height: "100%",
+                style: { position: 'absolute', top: 0, left: 0 },
+                config: { youtube: { playerVars: { controls: 0, disablekb: 1, modestbranding: 1 } } },
+                onProgress: handleProgress,
+                onDuration: (dur: number) => setAudioDuration(dur * 1000),
+                onPlay: () => {
+                  if (isHost) {
+                    setIsAudioPlaying(true);
+                  } else {
+                    const state = latestPlaybackStateRef.current;
+                    if (state?.is_playing) {
+                      setIsAudioPlaying(true);
+                    } else {
+                      console.warn('[SYNC] Browser resumed incorrectly. Forcing pause.');
+                      setIsAudioPlaying(false);
+                    }
+                  }
+                },
+                onPause: () => {
+                  if (isHost) {
+                    setIsAudioPlaying(false);
+                  } else {
+                    const state = latestPlaybackStateRef.current;
+                    if (state && state.is_playing) {
+                      console.warn('[SYNC] Browser paused unexpectedly (autoplay blocked or buffering).');
+                      setAutoplayBlocked(true);
+                      setIsAudioPlaying(false);
+                    } else {
+                      setIsAudioPlaying(false);
+                    }
+                  }
+                },
+                onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
+                onBufferEnd: () => {
+                  if (!isHost && wasBufferingRef.current) {
+                    const state = latestPlaybackStateRef.current;
+                    if (state && state.is_playing && playerRef.current) {
+                      const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
+                      if (Number.isFinite(expected)) {
+                        const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
+                        if (drift > 0.5) {
+                          safeSeek(playerRef.current, expected);
+                          lastHardSeekRef.current = Date.now();
+                        }
+                      }
+                    }
+                    wasBufferingRef.current = false;
+                  }
+                },
+                onError: (e: any) => {
+                  console.error('PLAYER ERROR', e);
+                  setAutoplayBlocked(true);
+                },
+                onEnded: () => {
+                  setIsAudioPlaying(false);
+                  void handleAdjacentTrack(1);
+                }
+              })}
+              {autoplayBlocked && <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}><button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button></div>}
             </div>
-          </div>
+          ) : (
+            <div className="player-art-wrap">
+              <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
+              <div className="art-overlay">
+                <span className="live-pill"><i /> LIVE</span>
+                <span>{room.visibility}</span>
+              </div>
+              {React.createElement(ReactPlayer as any, {
+                ref: playerRef,
+                url: getCurrentAudioUrl(),
+                playing: isAudioPlaying,
+                volume: volume,
+                width: "0px",
+                height: "0px",
+                style: { display: 'none' },
+                onProgress: handleProgress,
+                onDuration: (dur: number) => setAudioDuration(dur * 1000),
+                onPlay: () => {
+                  if (isHost) {
+                    setIsAudioPlaying(true);
+                  } else {
+                    const state = latestPlaybackStateRef.current;
+                    if (state?.is_playing) {
+                      setIsAudioPlaying(true);
+                    } else {
+                      setIsAudioPlaying(false);
+                    }
+                  }
+                },
+                onPause: () => {
+                  if (isHost) {
+                    setIsAudioPlaying(false);
+                  } else {
+                    const state = latestPlaybackStateRef.current;
+                    if (state && state.is_playing) {
+                      setAutoplayBlocked(true);
+                      setIsAudioPlaying(false);
+                    } else {
+                      setIsAudioPlaying(false);
+                    }
+                  }
+                },
+                onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
+                onBufferEnd: () => {
+                  if (!isHost && wasBufferingRef.current) {
+                    const state = latestPlaybackStateRef.current;
+                    if (state && state.is_playing && playerRef.current) {
+                      const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
+                      if (Number.isFinite(expected)) {
+                        const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
+                        if (drift > 0.5) {
+                          safeSeek(playerRef.current, expected);
+                          lastHardSeekRef.current = Date.now();
+                        }
+                      }
+                    }
+                    wasBufferingRef.current = false;
+                  }
+                },
+                onError: (e: any) => {
+                  setAutoplayBlocked(true);
+                },
+                onEnded: () => {
+                  setIsAudioPlaying(false);
+                  void handleAdjacentTrack(1);
+                }
+              })}
+              {autoplayBlocked && <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)'}}><button className="primary-button" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button></div>}
+            </div>
+          )}
 
           <div className="track-info-large">
             <div>
@@ -2182,6 +2313,18 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
             <span className="status-pill">{isHost ? 'Host control' : 'Synchronized with Host'}</span>
           </div>
 
+          {isHost ? (
+            <div className="player-controls">
+              <button className="icon-button" aria-label="Previous song" onClick={() => void handleAdjacentTrack(-1)} disabled={queue.length < 2}><SkipBack size={24} fill="currentColor" /></button>
+              <button className="play-button" aria-label={isAudioPlaying ? 'Pause' : 'Play'} onClick={() => void handlePlayPause()} disabled={!currentItem}>
+                {isAudioPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" style={{marginLeft:4}} />}
+              </button>
+              <button className="icon-button" aria-label="Next song" onClick={() => void handleAdjacentTrack(1)} disabled={queue.length < 2}><SkipForward size={24} fill="currentColor" /></button>
+            </div>
+          ) : (
+            <div className="host-locked-pill" style={{ marginBottom: 24 }}><Users size={16} /> Controlled by Host</div>
+          )}
+
           <div className="progress-wrap">
             <div className="progress-bar-bg">
               <div className="progress-bar-fill" style={{ width: `${Math.min(Math.max(progress, 0), 100)}%` }} />
@@ -2192,33 +2335,22 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
             </div>
           </div>
 
-          {isHost ? (
-            <>
-              <div className="player-controls">
-                <button className="icon-button" aria-label="Previous song" onClick={() => void handleAdjacentTrack(-1)} disabled={queue.length < 2}><SkipBack size={24} fill="currentColor" /></button>
-                <button className="play-button" aria-label={isAudioPlaying ? 'Pause' : 'Play'} onClick={() => void handlePlayPause()} disabled={!currentItem}>
-                  {isAudioPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" style={{marginLeft:4}} />}
-                </button>
-                <button className="icon-button" aria-label="Next song" onClick={() => void handleAdjacentTrack(1)} disabled={queue.length < 2}><SkipForward size={24} fill="currentColor" /></button>
+          {isHost && (
+            <div className="range-block">
+              <div className="range-header">
+                <label htmlFor="seek-slider">Seek</label>
+                <span>{formatTime(currentTime * 1000)} / {formatTime(durationMs || 0)}</span>
               </div>
-              <div className="range-block">
-                <div className="range-header">
-                  <label htmlFor="seek-slider">Seek</label>
-                  <span>{formatTime(currentTime * 1000)} / {formatTime(durationMs || 0)}</span>
-                </div>
-                <input
-                  id="seek-slider"
-                  type="range"
-                  min={0}
-                  max={Math.max(durationMs / 1000, 1)}
-                  step={0.1}
-                  value={currentTime}
-                  onChange={(event) => void handleSeek(Number(event.target.value))}
-                />
-              </div>
-            </>
-          ) : (
-            <div className="host-locked-pill"><Users size={16} /> Controlled by Host</div>
+              <input
+                id="seek-slider"
+                type="range"
+                min={0}
+                max={Math.max(durationMs / 1000, 1)}
+                step={0.1}
+                value={currentTime}
+                onChange={(event) => void handleSeek(Number(event.target.value))}
+              />
+            </div>
           )}
 
           <div className="volume-block">
@@ -2236,61 +2368,6 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
               <span>{Math.round(volume * 100)}%</span>
             </div>
           </div>
-
-          {autoplayBlocked && <button className="secondary-button full" onClick={() => void handleSyncAndPlay()}>Tap to Sync &amp; Play</button>}
-
-          {React.createElement(ReactPlayer as any, {
-            ref: playerRef,
-            url: getCurrentAudioUrl(),
-            playing: isAudioPlaying,
-            volume: volume,
-            width: "100%",
-            height: "100%",
-            style: { opacity: currentItem?.source_type === 'youtube' ? 1 : 0, position: 'absolute', top: 0, left: 0 },
-            config: { youtube: { playerVars: { controls: 0, disablekb: 1, modestbranding: 1 } } },
-            onProgress: handleProgress,
-            onDuration: (dur: number) => setAudioDuration(dur * 1000),
-            onPlay: () => setIsAudioPlaying(true),
-            onPause: () => {
-              if (isHost) {
-                setIsAudioPlaying(false);
-              } else {
-                const state = latestPlaybackStateRef.current;
-                if (state && state.is_playing) {
-                  console.warn('[SYNC] Browser paused unexpectedly (autoplay blocked or buffering).');
-                  setAutoplayBlocked(true);
-                  setIsAudioPlaying(false);
-                } else {
-                  setIsAudioPlaying(false);
-                }
-              }
-            },
-            onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
-            onBufferEnd: () => {
-              if (!isHost && wasBufferingRef.current) {
-                const state = latestPlaybackStateRef.current;
-                if (state && state.is_playing && playerRef.current) {
-                  const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
-                  if (Number.isFinite(expected)) {
-                    const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
-                    if (drift > 0.5) {
-                      safeSeek(playerRef.current, expected);
-                      lastHardSeekRef.current = Date.now();
-                    }
-                  }
-                }
-                wasBufferingRef.current = false;
-              }
-            },
-            onError: (e: any) => {
-              console.error('PLAYER ERROR', e);
-              setAutoplayBlocked(true);
-            },
-            onEnded: () => {
-              setIsAudioPlaying(false);
-              void handleAdjacentTrack(1);
-            }
-          })}
         </section>
 
         <div>
