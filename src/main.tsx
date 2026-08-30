@@ -1177,7 +1177,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
          artwork_url: playback.artwork_url || null,
          position: 0,
          duration_ms: null,
-         source_type: playback.media_id.startsWith('http') ? 'youtube' : 'upload',
+         source_type: (playback.media_id.startsWith('http') || playback.media_id.includes('/')) ? 'upload' : 'youtube',
          created_at: new Date().toISOString()
        } as QueueItem;
     }

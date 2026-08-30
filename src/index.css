@@ -1275,3 +1275,47 @@ button, .primary-button, .secondary-button, .icon-button, .play-button {
   background: var(--text-primary) !important;
   color: var(--bg-main) !important;
 }
+/* Custom Player Container rules added for exact mobile bounds */
+.player-container {
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 16/9;
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  margin-bottom: 24px;
+  background-color: #000;
+}
+
+.player-container:fullscreen,
+.player-art-wrap:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+  margin-bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.player-container iframe,
+.player-art-wrap iframe {
+  max-width: 100%;
+}
+
+.player-container:fullscreen iframe,
+.player-container:-webkit-full-screen iframe,
+.player-art-wrap:fullscreen iframe,
+.player-art-wrap:-webkit-full-screen iframe {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+@media (max-width: 768px) {
+  .player-panel { padding: 16px !important; }
+  .player-controls { gap: 12px !important; margin-bottom: 24px; }
+  .player-controls .icon-button { width: 36px !important; height: 36px !important; }
+  .play-button { width: 56px !important; height: 56px !important; }
+}
