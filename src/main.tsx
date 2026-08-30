@@ -1367,9 +1367,10 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       
       // If host is paused, ensure we are paused
       if (!state || state.is_playing === false) {
-        if (!isHost && isAudioPlaying) {
-           setIsAudioPlaying(false);
-        }
+        setIsAudioPlaying(prev => {
+          if (prev) return false;
+          return prev;
+        });
         return;
       }
       
@@ -1377,8 +1378,11 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       if (!player) return;
 
       // Force play if we should be playing but fell out of sync (e.g. after a buffer drop)
-      if (!isHost && !isAudioPlaying && !autoplayBlocked) {
-        setIsAudioPlaying(true);
+      if (!autoplayBlocked) {
+        setIsAudioPlaying(prev => {
+          if (!prev) return true;
+          return prev;
+        });
       }
       
       const expectedPosition = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
@@ -1399,7 +1403,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
            }
          }
       }
-    }, 500);
+    }, 200);
     
     return () => window.clearInterval(syncInterval);
   }, [isHost]);
@@ -2184,9 +2188,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           {currentItem?.source_type === 'youtube' ? (
             <div 
               ref={playerWrapperRef} 
-              style={{ 
-                width: '100%', aspectRatio: '16/9', position: 'relative', overflow: 'hidden', borderRadius: isFullscreen ? 0 : 8, marginBottom: 24, backgroundColor: '#000' 
-              }}
+              className="player-container"
             >
               {React.createElement(ReactPlayer as any, {
                 ref: playerRef,
@@ -2221,18 +2223,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 },
                 onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
                 onBufferEnd: () => {
-                  if (!isHost && wasBufferingRef.current) {
-                    const state = latestPlaybackStateRef.current;
-                    if (state && state.is_playing && playerRef.current) {
-                      const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
-                      if (Number.isFinite(expected)) {
-                        const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
-                        if (drift > 0.5) {
-                          safeSeek(playerRef.current, expected);
-                          lastHardSeekRef.current = Date.now();
-                        }
-                      }
-                    }
+                  if (!isHost) {
                     wasBufferingRef.current = false;
                   }
                 },
@@ -2245,15 +2236,13 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                   void handleAdjacentTrack(1);
                 }
               })}
-              {/* HOST FULLSCREEN */}
-              {isHost && (
-                <button onClick={handleFullscreen} style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
-                  {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-                </button>
-              )}
+              {/* FULLSCREEN BUTTON */}
+              <button onClick={handleFullscreen} className="fullscreen-button" style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
+                {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+              </button>
             </div>
           ) : (
-            <div className="player-art-wrap" style={{ position: 'relative' }}>
+            <div ref={playerWrapperRef} className="player-art-wrap" style={{ position: 'relative' }}>
               <div className="player-art" style={{ background: currentItem?.artwork_url ? `url(${currentItem.artwork_url}) center/cover no-repeat` : gradient }}></div>
               <div className="art-overlay">
                 <span className="live-pill"><i /> LIVE</span>
@@ -2291,18 +2280,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 },
                 onBuffer: () => { if(!isHost) wasBufferingRef.current = true; },
                 onBufferEnd: () => {
-                  if (!isHost && wasBufferingRef.current) {
-                    const state = latestPlaybackStateRef.current;
-                    if (state && state.is_playing && playerRef.current) {
-                      const expected = getExpectedPlaybackPosition(state, localStateReceiveTimeRef.current || undefined);
-                      if (Number.isFinite(expected)) {
-                        const drift = Math.abs(expected - (safeGetCurrentTime(playerRef.current) || 0));
-                        if (drift > 0.5) {
-                          safeSeek(playerRef.current, expected);
-                          lastHardSeekRef.current = Date.now();
-                        }
-                      }
-                    }
+                  if (!isHost) {
                     wasBufferingRef.current = false;
                   }
                 },
@@ -2315,6 +2293,10 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                   void handleAdjacentTrack(1);
                 }
               })}
+              {/* FULLSCREEN BUTTON */}
+              <button onClick={handleFullscreen} className="fullscreen-button" style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
+                {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+              </button>
             </div>
           )}
 
