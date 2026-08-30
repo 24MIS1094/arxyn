@@ -1,6 +1,6 @@
 import React, { type ChangeEvent, type FormEvent, Component, type ErrorInfo, type ReactNode, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { AlertCircle, ArrowUpRight, Check, Copy, Home as HomeIcon, LoaderCircle, LogOut, Menu, Music2, Pause, Play, Plus, Radio, Search, Settings, Share2, SkipBack, SkipForward, Users, X } from 'lucide-react';
+import { AlertCircle, ArrowUpRight, Check, Copy, Home as HomeIcon, LoaderCircle, LogOut, Menu, Music2, Pause, Play, Plus, Radio, Search, Settings, Share2, SkipBack, SkipForward, Users, X, Volume2 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from './lib/supabase';
 import type { Session } from '@supabase/supabase-js';
@@ -594,20 +594,6 @@ function Shell({
         <nav className="nav-main" aria-label="Main navigation">
           <button className={view === 'home' ? 'nav-item active' : 'nav-item'} onClick={() => setView('home')}>
             <HomeIcon size={18} />Home
-          </button>
-          <button className={view === 'browse' ? 'nav-item active' : 'nav-item'} onClick={() => setView('browse')}>
-            <Music2 size={18} />Browse
-          </button>
-          <button className={view === 'search' ? 'nav-item active' : 'nav-item'} onClick={() => setView('search')}>
-            <Search size={18} />Search
-          </button>
-
-          <div className="nav-section-title">Your Library</div>
-          <button className={view === 'library' ? 'nav-item active' : 'nav-item'} onClick={() => setView('library')}>
-            <HomeIcon size={18} />Library
-          </button>
-          <button className={view === 'playlists' ? 'nav-item active' : 'nav-item'} onClick={() => setView('playlists')}>
-            <Music2 size={18} />Playlists
           </button>
 
           <div className="nav-section-title">Syncwave</div>
