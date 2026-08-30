@@ -511,7 +511,10 @@ function Auth({ initError }: { initError?: string | null }) {
       </div>
 
       <main className="auth-card">
-        <div className="auth-mobile-brand">ARXYN</div>
+        <div className="auth-mobile-brand">
+          <span className="brand-mark" style={{width: 24, height: 24}}><Radio size={14} /></span>
+          ARXYN
+        </div>
         <p className="eyebrow">WELCOME BACK</p>
         <h2>{mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Reset password'}</h2>
 
@@ -1506,6 +1509,10 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           return [...prev, data];
         });
       })
+      .on('broadcast', { event: 'approve-video' }, (payload) => {
+        const data = payload.payload as { userId: string };
+        setMembers(prev => prev.map(m => m.user_id === data.userId ? { ...m, video_access: true } : m));
+      })
       .on('presence', { event: 'join' }, () => {
         setPresenceUsers(normalizePresenceUsers(channel.presenceState() as Record<string, Array<Record<string, unknown>>>));
       })
@@ -2145,10 +2152,20 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   };
 
   const handleApproveVideo = async (targetUserId: string) => {
-    if (!supabase || !isHost) return;
-    const { error } = await supabase.from('room_members').update({ video_access: true }).eq('room_id', roomId).eq('user_id', targetUserId);
-    if (!error) {
-      setVideoRequests(prev => prev.filter(r => r.userId !== targetUserId));
+    if (!isHost) return;
+    
+    // Broadcast instantly to guarantee immediate UI update for friend
+    roomChannelRef.current?.send({
+      type: 'broadcast',
+      event: 'approve-video',
+      payload: { userId: targetUserId }
+    });
+    
+    setVideoRequests(prev => prev.filter(r => r.userId !== targetUserId));
+    
+    // Also try to persist to DB
+    if (supabase) {
+      await supabase.from('room_members').update({ video_access: true }).eq('room_id', roomId).eq('user_id', targetUserId);
     }
   };
 
@@ -2238,7 +2255,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 style={hasVideoAccess ? { 
                   width: '100%', aspectRatio: '16/9', position: 'relative', overflow: 'hidden', borderRadius: isFullscreen ? 0 : 8, marginBottom: 24, backgroundColor: '#000' 
                 } : { 
-                  position: 'absolute', opacity: 0.01, pointerEvents: 'none', zIndex: -10, width: '10px', height: '10px'
+                  position: 'absolute', left: '-9999px', top: '-9999px', width: '250px', height: '250px', zIndex: -10
                 }}
               >
                 {React.createElement(ReactPlayer as any, {
