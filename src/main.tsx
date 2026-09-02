@@ -1148,6 +1148,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
   const [volume, setVolume] = useState(0.8);
   const [profileName, setProfileName] = useState('You');
+  const [isInitialLoadDone, setIsInitialLoadDone] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
   const currentItemRef = useRef<QueueItem | null>(null);
@@ -1177,7 +1178,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
          artwork_url: playback.artwork_url || null,
          position: 0,
          duration_ms: null,
-         source_type: (playback.media_id.startsWith('http') || playback.media_id.includes('/')) ? 'upload' : 'youtube',
+         source_type: (playback.media_id.includes('youtube.com') || playback.media_id.includes('youtu.be')) ? 'youtube' : 'upload',
          created_at: new Date().toISOString()
        } as QueueItem;
     }
@@ -1468,6 +1469,9 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
       if (playbackData) {
         setPlayback(playbackData as PlaybackState);
+        if (roomData.host_id !== userId) {
+           applyAuthoritativePlaybackState(playbackData as PlaybackState);
+        }
       } else {
         setPlayback({
           room_id: roomId,
@@ -1484,6 +1488,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       }
 
       void loadRoomMembers(client);
+      setIsInitialLoadDone(true);
     };
 
     void loadRoom();
@@ -1501,7 +1506,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
 
   useEffect(() => {
-    if (!supabase || !roomId) return;
+    if (!supabase || !roomId || !isInitialLoadDone) return;
     const client = supabase;
 
     const channel = client.channel(`room:${roomId}`);
@@ -1660,7 +1665,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       setPresenceUsers([]);
       void client.removeChannel(channel);
     };
-  }, [roomId, userId]); // REMOVED profileName and room?.host_id to prevent channel tearing
+  }, [roomId, userId, isInitialLoadDone]); // REMOVED profileName and room?.host_id to prevent channel tearing
 
   useEffect(() => {
     if (!roomChannelRef.current || connectionStatus !== 'connected') return;
@@ -2126,20 +2131,50 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 
 
   const handleFullscreen = () => {
-    if (!playerWrapperRef.current) return;
-    if (!document.fullscreenElement) {
-      void playerWrapperRef.current.requestFullscreen();
+    const elem = playerWrapperRef.current as any;
+    if (!elem) return;
+    const doc = document as any;
+
+    if (!doc.fullscreenElement && !doc.webkitFullscreenElement && !doc.mozFullScreenElement && !doc.msFullscreenElement) {
+      if (elem.requestFullscreen) {
+        void elem.requestFullscreen();
+      } else if (elem.webkitRequestFullscreen) {
+        void elem.webkitRequestFullscreen();
+      } else if (elem.webkitEnterFullscreen) {
+        void elem.webkitEnterFullscreen(); // For iOS video
+      } else if (elem.mozRequestFullScreen) {
+        void elem.mozRequestFullScreen();
+      } else if (elem.msRequestFullscreen) {
+        void elem.msRequestFullscreen();
+      }
     } else {
-      void document.exitFullscreen();
+      if (doc.exitFullscreen) {
+        void doc.exitFullscreen();
+      } else if (doc.webkitExitFullscreen) {
+        void doc.webkitExitFullscreen();
+      } else if (doc.mozCancelFullScreen) {
+        void doc.mozCancelFullScreen();
+      } else if (doc.msExitFullscreen) {
+        void doc.msExitFullscreen();
+      }
     }
   };
 
   useEffect(() => {
     const onFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+      const doc = document as any;
+      setIsFullscreen(!!(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement));
     };
     document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+    document.addEventListener('mozfullscreenchange', onFullscreenChange);
+    document.addEventListener('MSFullscreenChange', onFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
+      document.removeEventListener('mozfullscreenchange', onFullscreenChange);
+      document.removeEventListener('MSFullscreenChange', onFullscreenChange);
+    };
   }, []);
 
   if (error) {
@@ -2198,7 +2233,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 width: "100%",
                 height: "100%",
                 style: { position: 'absolute', top: 0, left: 0 },
-                config: { youtube: { playerVars: { controls: 0, disablekb: 1, modestbranding: 1 } } },
+                config: { youtube: { playerVars: { playsinline: 1, controls: 0, disablekb: 1, modestbranding: 1 } } },
                 onProgress: handleProgress,
                 onDuration: (dur: number) => setAudioDuration(dur * 1000),
                 onPlay: () => {
