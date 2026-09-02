@@ -2232,7 +2232,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 volume: volume,
                 width: "100%",
                 height: "100%",
-                style: { position: 'absolute', top: 0, left: 0 },
+                style: { position: 'absolute', top: 0, left: 0, pointerEvents: 'none' },
                 config: { youtube: { playerVars: { playsinline: 1, controls: 0, disablekb: 1, modestbranding: 1 } } },
                 onProgress: handleProgress,
                 onDuration: (dur: number) => setAudioDuration(dur * 1000),
