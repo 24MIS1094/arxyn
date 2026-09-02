@@ -1426,7 +1426,7 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   }, [isHost]);
 
   useEffect(() => {
-    const loadRoom = async () => {
+    const loadRoom = async (isResync = false) => {
       if (!supabase) return;
       const client = supabase;
 
@@ -1437,11 +1437,13 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         .maybeSingle();
 
       if (roomError || !roomData) {
-        if (!roomData) {
-          setError('Room no longer exists.');
-        } else {
-          logSupabaseError('rooms', 'SELECT room', roomError ?? { message: 'Unknown room query error.' });
-          setError('Unable to load this room. Please try again.');
+        if (!isResync) {
+          if (!roomData) {
+            setError('Room no longer exists.');
+          } else {
+            logSupabaseError('rooms', 'SELECT room', roomError ?? { message: 'Unknown room query error.' });
+            setError('Unable to load this room. Please try again.');
+          }
         }
         return;
       }
@@ -1451,9 +1453,11 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
       try {
         await joinRoom(roomId);
       } catch (joinError) {
-        const errorMessage = joinError instanceof Error ? joinError.message : String(joinError);
-        logSupabaseError('join_room RPC', 'JOIN room', { message: errorMessage });
-        setError('Unable to join this room. Please try again.');
+        if (!isResync) {
+          const errorMessage = joinError instanceof Error ? joinError.message : String(joinError);
+          logSupabaseError('join_room RPC', 'JOIN room', { message: errorMessage });
+          setError('Unable to join this room. Please try again.');
+        }
         return;
       }
 
@@ -1464,8 +1468,10 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         .order('position', { ascending: true });
 
       if (queueError) {
-        logSupabaseError('queue_items', 'SELECT room queue', queueError);
-        setError(`Unable to load queue: ${queueError.message}`);
+        if (!isResync) {
+          logSupabaseError('queue_items', 'SELECT room queue', queueError);
+          setError(`Unable to load queue: ${queueError.message}`);
+        }
         return;
       }
 
@@ -1478,8 +1484,10 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
         .maybeSingle();
 
       if (playbackError) {
-        logSupabaseError('playback_state', 'SELECT room playback', playbackError);
-        setError(`Unable to load playback: ${playbackError.message}`);
+        if (!isResync) {
+          logSupabaseError('playback_state', 'SELECT room playback', playbackError);
+          setError(`Unable to load playback: ${playbackError.message}`);
+        }
         return;
       }
 
@@ -1508,6 +1516,18 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     };
 
     void loadRoom();
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void loadRoom(true);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [roomId, userId]);
 
   useEffect(() => {
