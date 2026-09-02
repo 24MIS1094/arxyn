@@ -1130,6 +1130,17 @@ function SettingsView({ dark, setDark, logout }: { dark: boolean; setDark: (dark
   );
 }
 
+const QUALITY_LABELS: Record<string, string> = {
+  highres: '1080p+',
+  hd1080: '1080p',
+  hd720: '720p',
+  large: '480p',
+  medium: '360p',
+  small: '240p',
+  tiny: '144p',
+  auto: 'Auto'
+};
+
 function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { roomId: string; userId: string; notify: (text: string) => void; onRoomDeleted: () => void; isHidden?: boolean; onExpand?: () => void }) {
   const [room, setRoom] = useState<Room | null>(null);
   const [queue, setQueue] = useState<QueueItem[]>([]);
@@ -1150,6 +1161,11 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
   const [profileName, setProfileName] = useState('You');
   const [isInitialLoadDone, setIsInitialLoadDone] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [availableQualities, setAvailableQualities] = useState<string[]>([]);
+  const [currentQuality, setCurrentQuality] = useState<string>(() => {
+    try { return localStorage.getItem('arxyn_video_quality') || 'auto'; } catch { return 'auto'; }
+  });
+  const [showQualityMenu, setShowQualityMenu] = useState(false);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
   const currentItemRef = useRef<QueueItem | null>(null);
   const isTransitioningRef = useRef(false);
@@ -2177,6 +2193,21 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     };
   }, []);
 
+  const handleQualityChange = (quality: string) => {
+    setCurrentQuality(quality);
+    try {
+      localStorage.setItem('arxyn_video_quality', quality);
+    } catch {}
+    setShowQualityMenu(false);
+    
+    if (playerRef.current) {
+      const internal = playerRef.current.getInternalPlayer();
+      if (internal && internal.setPlaybackQuality) {
+        internal.setPlaybackQuality(quality);
+      }
+    }
+  };
+
   if (error) {
     return <div className="content"><div className="empty-state"><Radio size={26} /><h3>Room unavailable</h3><p>{error}</p></div></div>;
   }
@@ -2236,6 +2267,18 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                 config: { youtube: { playerVars: { playsinline: 1, controls: 0, disablekb: 1, modestbranding: 1 } } },
                 onProgress: handleProgress,
                 onDuration: (dur: number) => setAudioDuration(dur * 1000),
+                onReady: (player: any) => {
+                  const internal = player.getInternalPlayer();
+                  if (internal && internal.getAvailableQualityLevels) {
+                    const levels = internal.getAvailableQualityLevels();
+                    if (levels && levels.length > 0) {
+                      setAvailableQualities(levels);
+                      if (currentQuality && currentQuality !== 'auto' && levels.includes(currentQuality)) {
+                        internal.setPlaybackQuality(currentQuality);
+                      }
+                    }
+                  }
+                },
                 onPlay: () => {
                   setAutoplayBlocked(false);
                   if (isHost) {
@@ -2271,10 +2314,31 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
                   void handleAdjacentTrack(1);
                 }
               })}
-              {/* FULLSCREEN BUTTON */}
-              <button onClick={handleFullscreen} className="fullscreen-button" style={{ position: 'absolute', bottom: 10, right: 10, background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', zIndex: 10 }}>
-                {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-              </button>
+              {/* OVERLAY CONTROLS */}
+              <div style={{ position: 'absolute', bottom: 10, right: 10, zIndex: 10, display: 'flex', gap: '8px', alignItems: 'center' }}>
+                {availableQualities.length > 0 && (
+                  <div style={{ position: 'relative' }}>
+                    <button onClick={() => setShowQualityMenu(!showQualityMenu)} className="secondary-button" style={{ background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 10px', borderRadius: 4, cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                      <Settings size={14} style={{ marginRight: 6 }} /> {QUALITY_LABELS[currentQuality] || currentQuality}
+                    </button>
+                    {showQualityMenu && (
+                      <div style={{ position: 'absolute', bottom: '100%', right: 0, marginBottom: 8, background: 'var(--bg-panel)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: 4, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 140, backdropFilter: 'blur(10px)', boxShadow: '0 -4px 12px rgba(0,0,0,0.3)' }}>
+                        <button onClick={() => handleQualityChange('auto')} style={{ background: currentQuality === 'auto' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', color: 'white', padding: '10px 12px', textAlign: 'left', borderRadius: 4, cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          Auto {currentQuality === 'auto' && <Check size={14} />}
+                        </button>
+                        {availableQualities.filter(q => q !== 'auto').map(q => (
+                          <button key={q} onClick={() => handleQualityChange(q)} style={{ background: currentQuality === q ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', color: 'white', padding: '10px 12px', textAlign: 'left', borderRadius: 4, cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            {QUALITY_LABELS[q] || q} {currentQuality === q && <Check size={14} />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <button onClick={handleFullscreen} className="fullscreen-button" style={{ background: 'rgba(0,0,0,0.5)', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer' }}>
+                  {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                </button>
+              </div>
             </div>
           ) : (
             <div ref={playerWrapperRef} className="player-art-wrap" style={{ position: 'relative' }}>
