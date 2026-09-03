@@ -5,6 +5,7 @@ import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from './lib/supabase';
 import type { Session } from '@supabase/supabase-js';
 import ReactPlayer from 'react-player';
+import { ChatPanel, RequestsPanel } from './ChatAndRequests';
 import './index.css';
 
 type View = 'home' | 'rooms' | 'profile' | 'settings' | 'room' | 'browse' | 'search' | 'library' | 'playlists' | 'downloads' | 'connected';
@@ -663,7 +664,21 @@ function Shell({
       {modal === 'create' && <CreateRoom userId={session.user.id} close={() => setModal(null)} openRoom={openRoom} notify={notify} />}
       {modal === 'join' && <JoinRoom close={() => setModal(null)} openRoom={openRoom} notify={notify} />}
 
-      {toast && <div className="toast">{toast}</div>}
+      {toast && (
+        <div 
+          className="toast"
+          onClick={() => {
+            if (toast.startsWith('💬')) {
+              window.dispatchEvent(new CustomEvent('open-chat'));
+            } else if (toast.startsWith('🎵')) {
+              window.dispatchEvent(new CustomEvent('open-requests'));
+            }
+          }}
+          style={{ cursor: (toast.startsWith('💬') || toast.startsWith('🎵')) ? 'pointer' : 'default' }}
+        >
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
@@ -1166,10 +1181,25 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
     try { return localStorage.getItem('arxyn_video_quality') || 'auto'; } catch { return 'auto'; }
   });
   const [showQualityMenu, setShowQualityMenu] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [showRequests, setShowRequests] = useState(false);
+  const [unreadChat, setUnreadChat] = useState(0);
+  const [unreadRequests, setUnreadRequests] = useState(0);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
   const currentItemRef = useRef<QueueItem | null>(null);
   const isTransitioningRef = useRef(false);
   const localStateReceiveTimeRef = useRef<number>(0);
+
+  useEffect(() => {
+    const handleOpenChat = () => setShowChat(true);
+    const handleOpenRequests = () => setShowRequests(true);
+    window.addEventListener('open-chat', handleOpenChat);
+    window.addEventListener('open-requests', handleOpenRequests);
+    return () => {
+      window.removeEventListener('open-chat', handleOpenChat);
+      window.removeEventListener('open-requests', handleOpenRequests);
+    };
+  }, []);
   const lastHardSeekRef = useRef<number>(0);
   const wasBufferingRef = useRef<boolean>(false);
   const scheduledPlayTimeoutRef = useRef<number | null>(null);
@@ -2257,16 +2287,26 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           </div>
         </div>
 
-        {isHost && (
-          <div className="header-actions">
-            <button className="secondary-button" onClick={() => void copyText(room.code, 'Room code copied!')}> <Copy size={15} />Copy Code</button>
-            <button className="secondary-button" onClick={() => void handleShareRoom()}>
-              <Share2 size={15} />Share Room
-            </button>
-            <button className="secondary-button" onClick={() => setShowQr(true)}>Show QR</button>
-            <button className="danger-button" onClick={() => void handleDeleteRoom()}>Delete Room</button>
-          </div>
-        )}
+        <div className="header-actions">
+          {isHost && (
+            <>
+              <button className="secondary-button" onClick={() => void copyText(room.code, 'Room code copied!')}> <Copy size={15} />Copy Code</button>
+              <button className="secondary-button" onClick={() => void handleShareRoom()}>
+                <Share2 size={15} />Share Room
+              </button>
+              <button className="secondary-button" onClick={() => setShowQr(true)}>Show QR</button>
+              <button className="danger-button" onClick={() => void handleDeleteRoom()}>Delete Room</button>
+            </>
+          )}
+          <button className="secondary-button" onClick={() => setShowChat(true)} style={{ position: 'relative' }}>
+            💬 Chat
+            {unreadChat > 0 && <span className="badge">{unreadChat}</span>}
+          </button>
+          <button className="secondary-button" onClick={() => setShowRequests(true)} style={{ position: 'relative' }}>
+            🎵 Requests
+            {unreadRequests > 0 && <span className="badge">{unreadRequests}</span>}
+          </button>
+        </div>
       </div>
 
       <div className="room-layout">
@@ -2520,17 +2560,17 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           <aside className="queue-panel">
             <div className="queue-header">
               <h3>Play Queue</h3>
-              {isHost && (
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button type="button" className="primary-button" style={{ padding: '6px 12px', fontSize: '12px', height: 'auto', borderRadius: '100px' }} onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShowSearchModal(true); }}>
-                    <Search size={14} style={{ marginRight: '4px' }} /> Search Music
-                  </button>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button type="button" className="primary-button" style={{ padding: '6px 12px', fontSize: '12px', height: 'auto', borderRadius: '100px' }} onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShowSearchModal(true); }}>
+                  <Search size={14} style={{ marginRight: '4px' }} /> Search Music
+                </button>
+                {isHost && (
                   <label className="upload-button">
                     <Plus size={14} />ADD SONGS
                     <input type="file" accept="audio/*" multiple onChange={handleAddSong} />
                   </label>
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
           <div className="queue-list">
@@ -2568,13 +2608,36 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           </div>
         </Modal>
       )}
-      {isHost && showSearchModal && (
+      {showSearchModal && (
         <SearchMusicModal
           close={() => setShowSearchModal(false)}
           onAddSong={async (track) => {
-            await handleAddSearchResult(track);
+            if (isHost) {
+              await handleAddSearchResult(track);
+            } else {
+              if (supabase) {
+                const { error } = await supabase.from('song_requests').insert({
+                  room_id: roomId,
+                  requester_id: userId,
+                  requester_name: 'Friend', // We could fetch proper name, but let's just pass this
+                  song_title: track.title,
+                  artist: track.artist,
+                  thumbnail: track.artwork_url,
+                  video_id: track.media_id,
+                  status: 'pending'
+                });
+                
+                if (error) {
+                  console.error('Song request insert error:', error.code, error.message, error.details, error.hint);
+                  notify('Failed to send request. Check console.');
+                } else {
+                  notify('Song request sent to Host 🎵');
+                }
+              }
+            }
             setShowSearchModal(false);
           }}
+          isHost={isHost}
         />
       )}
     </div>
@@ -2590,6 +2653,24 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
           </button>
         </div>
       )}
+        <ChatPanel 
+          roomId={roomId} 
+          userId={userId} 
+          members={members} 
+          isOpen={showChat}
+          close={() => setShowChat(false)} 
+          notify={notify}
+          onUnreadChange={(count) => setUnreadChat(count)}
+        />
+        <RequestsPanel 
+          roomId={roomId} 
+          isHost={isHost} 
+          userId={userId} 
+          isOpen={showRequests}
+          close={() => setShowRequests(false)} 
+          notify={notify}
+          onPendingChange={(count) => setUnreadRequests(count)}
+        />
     </>
   );
 }
@@ -2597,9 +2678,11 @@ function Room({ roomId, userId, notify, onRoomDeleted, isHidden, onExpand }: { r
 function SearchMusicModal({
   close,
   onAddSong,
+  isHost = true,
 }: {
   close: () => void;
   onAddSong: (item: { title: string; artist: string; media_id: string; artwork_url: string | null; duration_ms: number; source_type: string }) => Promise<void>;
+  isHost?: boolean;
 }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<any[]>([]);
@@ -2745,7 +2828,7 @@ function SearchMusicModal({
                     onClick={() => void handleAdd(track)}
                     style={{ padding: '6px 12px', fontSize: '13px', minWidth: '70px' }}
                   >
-                    {addingId === track.id.videoId ? <LoaderCircle className="spin" size={14} /> : <><Plus size={14} style={{marginRight:4}} /> Add</>}
+                    {addingId === track.id.videoId ? <LoaderCircle className="spin" size={14} /> : <><Plus size={14} style={{marginRight:4}} /> {isHost ? 'Add' : 'Request'}</>}
                   </button>
                 </div>
               ))}
